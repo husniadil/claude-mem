@@ -36,6 +36,7 @@ const healthMonitor = {
 const spawnGate = {
   acquireSpawnLock: mock(() => true),
   releaseSpawnLock: mock(() => {}),
+  isRemoteWorkerOnly: mock(() => false),
 };
 
 // port-reclaim must be stubbed like the rest of the module graph: its
@@ -105,6 +106,8 @@ function resetMocks(): void {
   spawnGate.acquireSpawnLock.mockReset();
   spawnGate.acquireSpawnLock.mockReturnValue(true);
   spawnGate.releaseSpawnLock.mockReset();
+  spawnGate.isRemoteWorkerOnly.mockReset();
+  spawnGate.isRemoteWorkerOnly.mockReturnValue(false);
 }
 
 describe('ensureWorkerStarted startup readiness', () => {
@@ -266,5 +269,30 @@ describe('ensureWorkerStarted validation guards', () => {
     const bogusPath = '/tmp/__claude-mem-test-nonexistent-worker-script.cjs';
     const result = await ensureWorkerStarted(39002, bogusPath);
     expect(result).toBe('dead');
+  });
+});
+
+describe('ensureWorkerStarted with a remote worker', () => {
+  it('returns dead without spawning when the remote worker does not answer', async () => {
+    resetMocks();
+    spawnGate.isRemoteWorkerOnly.mockReturnValue(true);
+
+    const result = await ensureWorkerStarted(39010, import.meta.filename);
+
+    expect(result).toBe('dead');
+    expect(processManager.spawnDaemon).not.toHaveBeenCalled();
+    expect(spawnGate.acquireSpawnLock).not.toHaveBeenCalled();
+  });
+
+  it('still reports a healthy remote worker as ready', async () => {
+    resetMocks();
+    spawnGate.isRemoteWorkerOnly.mockReturnValue(true);
+    healthMonitor.waitForHealth.mockResolvedValue(true);
+    healthMonitor.waitForReadiness.mockResolvedValue(true);
+
+    const result = await ensureWorkerStarted(39011, import.meta.filename);
+
+    expect(result).toBe('ready');
+    expect(processManager.spawnDaemon).not.toHaveBeenCalled();
   });
 });
