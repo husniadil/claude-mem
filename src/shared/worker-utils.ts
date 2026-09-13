@@ -15,7 +15,7 @@ import { checkVersionMatch, isPortInUse } from "../services/infrastructure/index
 // tests mock the barrel module wholesale, and the resolver must stay real.
 // ProcessManager imports nothing from worker-utils, so no cycle.
 import { resolveWorkerRuntimePath } from "../services/infrastructure/ProcessManager.js";
-import { acquireSpawnLock, releaseSpawnLock } from "./worker-spawn-gate.js";
+import { acquireSpawnLock, isRemoteWorkerOnly, releaseSpawnLock } from "./worker-spawn-gate.js";
 import { killProcessTree } from "./kill-process-tree.js";
 import { writeJsonFileAtomic } from "./atomic-json.js";
 
@@ -723,6 +723,17 @@ export async function ensureWorkerRunning(): Promise<boolean> {
     // The killed worker's PID file is left behind; the successor's boot
     // removes it (validateWorkerPidFile returns 'stale' for a dead pid).
     // Fall through to (re)spawn + readiness wait below.
+  }
+
+  // Same rule as worker-spawner.ts: a worker on another machine is not this
+  // one's to start. Guarding here too, because this path is reached from the
+  // transcript processor rather than from ensureWorkerStarted.
+  if (isRemoteWorkerOnly()) {
+    logger.error(
+      'SYSTEM',
+      'Remote worker did not answer and CLAUDE_MEM_REMOTE_WORKER_ONLY is set — refusing to lazy-spawn a local worker'
+    );
+    return false;
   }
 
   const runtimePath = resolveWorkerRuntimePath();

@@ -16,7 +16,7 @@ import {
   waitForHealth,
   waitForReadiness,
 } from './infrastructure/HealthMonitor.js';
-import { acquireSpawnLock, releaseSpawnLock } from '../shared/worker-spawn-gate.js';
+import { acquireSpawnLock, isRemoteWorkerOnly, releaseSpawnLock } from '../shared/worker-spawn-gate.js';
 import { isPidAlive } from '../supervisor/process-registry.js';
 import { reclaimGhostListeningPort } from '../shared/port-reclaim.js';
 
@@ -128,6 +128,19 @@ export async function ensureWorkerStarted(
     }
     logger.info('SYSTEM', 'Worker already running and healthy');
     return ready ? 'ready' : 'warming';
+  }
+
+  // Past this point the configured endpoint did not answer, and everything
+  // below treats that as "spawn one here". That is wrong when the worker is
+  // on another machine: see isRemoteWorkerOnly() for what the local spawn
+  // costs. Refuse instead, and say which endpoint went quiet.
+  if (isRemoteWorkerOnly()) {
+    logger.error(
+      'SYSTEM',
+      'Remote worker did not answer and CLAUDE_MEM_REMOTE_WORKER_ONLY is set — refusing to spawn a local worker',
+      { port }
+    );
+    return 'dead';
   }
 
   const portInUse = await isPortInUse(port);

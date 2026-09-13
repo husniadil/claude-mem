@@ -2,6 +2,7 @@ import { dirname, join } from 'path';
 import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { resolveDataDir } from './paths.js';
 import { logger } from '../utils/logger.js';
+import { SettingsDefaultsManager } from './SettingsDefaultsManager.js';
 
 /**
  * Cross-launcher spawn lockfile (Phase 4 of
@@ -154,5 +155,39 @@ export function releaseSpawnLock(): void {
   } catch {
     // Missing, unreadable, or corrupt lock file — leave it alone; the
     // staleness breaker (SPAWN_LOCK_STALE_MS) reclaims anything orphaned.
+  }
+}
+
+/**
+ * Is the worker somebody else's machine to run?
+ *
+ * `CLAUDE_MEM_WORKER_HOST` can point at another host, or at the local end of
+ * an ssh tunnel to one. In that setup an unreachable worker reads exactly like
+ * "no worker yet" to every launcher above: the health probe fails, the port is
+ * free, and the spawn goes ahead. What comes up is a LOCAL worker on the
+ * configured port, capturing into the local `CLAUDE_MEM_DATA_DIR` — so memory
+ * silently splits across two databases, and a tunnel can no longer rebind the
+ * port it just lost. Both halves look healthy; nothing reports the split.
+ *
+ * With this set, an unreachable remote worker is a failure rather than an
+ * invitation to spawn. The hooks are fail-open by design, so the session
+ * continues without memory and the operator has one thing to fix instead of
+ * two datasets to reconcile.
+ *
+ * Read from the settings FILE rather than `SettingsDefaultsManager.get()`,
+ * which consults only `process.env` and the compiled defaults: a value written
+ * to `~/.claude-mem/settings.json` would be invisible to it (the same reason
+ * worker-service.ts reads the TV token from the file).
+ */
+export function isRemoteWorkerOnly(): boolean {
+  try {
+    const settings = SettingsDefaultsManager.loadFromFile(
+      join(resolveDataDir(), 'settings.json'),
+    );
+    return (settings.CLAUDE_MEM_REMOTE_WORKER_ONLY ?? '').trim().toLowerCase() === 'true';
+  } catch {
+    // Unreadable settings must not turn into a refusal to start the worker:
+    // the default posture is the one this project shipped with.
+    return false;
   }
 }
