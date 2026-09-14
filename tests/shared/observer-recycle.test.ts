@@ -3,6 +3,7 @@ import {
   conversationChars,
   shouldRecycleConversation,
   resolveConversationMaxChars,
+  observerBatchCeiling,
   OBSERVER_CONVERSATION_MAX_CHARS,
 } from '../../src/shared/observer-recycle.js';
 import { wrapPriorContext } from '../../src/sdk/prompts.js';
@@ -88,5 +89,16 @@ describe('wrapPriorContext — continuity across generations (#3800)', () => {
     // hook already uses. This block must not reformat what it is given.
     const generated = '### Aug 19\n111056 2:18p discovery Tool search returns same results';
     expect(wrapPriorContext(generated)).toContain(generated);
+  });
+});
+
+describe('observerBatchCeiling — the share of the budget in one turn (#4066)', () => {
+  it('is a quarter of the budget', () => {
+    expect(observerBatchCeiling(400_000)).toBe(100_000);
+    expect(observerBatchCeiling(120_000)).toBe(30_000);
+  });
+
+  it('never reaches zero, so a batch always holds at least one observation', () => {
+    expect(observerBatchCeiling(1)).toBe(1);
   });
 });

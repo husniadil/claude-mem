@@ -50,6 +50,12 @@ export interface ActiveSession {
    * tool call spawns a generator that can only abort on the same budget check.
    */
   overflowPausedUntilMs?: number;
+  /**
+   * Whether the observer is answering a turn, and the resolver of a generator
+   * waiting for it to finish. The generator sends one turn at a time (#4066).
+   */
+  turnInFlight?: boolean;
+  turnWaiter?: (() => void) | null;
   forceInit?: boolean;
   idleTimedOut?: boolean;  
   lastGeneratorActivity: number;

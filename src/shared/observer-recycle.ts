@@ -63,3 +63,16 @@ export function resolveConversationMaxChars(raw: string | undefined): number {
   }
   return parsed;
 }
+
+/**
+ * Most chars the observer is sent in one turn, a quarter of the budget.
+ *
+ * The generator sends one turn at a time and batches the buffered observations
+ * into it (#4066). The ceiling keeps a backlog from arriving as one request
+ * nearly the size of the whole budget, and bounds how far past the budget a
+ * generation can reach before its next recycle check: one batch, plus the one
+ * observation that crossed the ceiling.
+ */
+export function observerBatchCeiling(maxChars: number): number {
+  return Math.max(1, Math.floor(maxChars / 4));
+}

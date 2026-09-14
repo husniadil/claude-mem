@@ -159,7 +159,12 @@ export class SessionMessageBuffer {
     return messages;
   }
 
-  peekTypes(sessionDbId: number): Array<{ message_type: string; tool_name: string | null }> {
+  /** The message the drain would yield next, without claiming it. */
+  peekNextUnclaimed(sessionDbId: number): PendingMessage | null {
+    return this.buffers.get(sessionDbId)?.find(m => !m.claimed)?.message ?? null;
+  }
+
+    peekTypes(sessionDbId: number): Array<{ message_type: string; tool_name: string | null }> {
     return (this.buffers.get(sessionDbId) ?? []).map(m => ({
       message_type: m.message.type,
       tool_name: m.message.tool_name ?? null
