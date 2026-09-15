@@ -1,15 +1,66 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { createServer } from 'net';
+import { tmpdir } from 'os';
 import path from 'path';
 import { buildStatusOutput, formatDependencyHealthHint, StatusOutput } from '../../src/services/worker-service.js';
 
 const WORKER_SCRIPT = path.join(__dirname, '../../plugin/scripts/worker-service.cjs');
 
+// `worker-service.cjs start` launches a real, detached worker daemon that
+// outlives the test process. Left alone it ran on the default port against the
+// suite's shared data dir, and nothing stopped it: every run of this file left a
+// worker (and its chroma-mcp child) behind, on the port a production worker
+// uses. The CLI tests below get a data dir and a port of their own, no Chroma,
+// and a stop in afterAll.
+let workerDataDir = '';
+let workerEnv: NodeJS.ProcessEnv = process.env;
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() => resolve(typeof address === 'object' && address ? address.port : 0));
+    });
+  });
+}
+
+beforeAll(async () => {
+  workerDataDir = mkdtempSync(path.join(tmpdir(), 'claude-mem-worker-json-status-'));
+  workerEnv = {
+    ...process.env,
+    CLAUDE_MEM_DATA_DIR: workerDataDir,
+    CLAUDE_MEM_WORKER_HOST: '127.0.0.1',
+    CLAUDE_MEM_WORKER_PORT: String(await freePort()),
+    CLAUDE_MEM_CHROMA_ENABLED: 'false',
+  };
+});
+
+afterAll(() => {
+  if (existsSync(WORKER_SCRIPT)) {
+    spawnSync('bun', [WORKER_SCRIPT, 'stop'], { encoding: 'utf-8', timeout: 30000, env: workerEnv });
+  }
+  // A worker that did not answer the shutdown request is killed by its pid file.
+  const pidFile = path.join(workerDataDir, 'worker.pid');
+  if (existsSync(pidFile)) {
+    try {
+      const pid = Number(JSON.parse(readFileSync(pidFile, 'utf-8')).pid);
+      if (pid > 0) process.kill(pid, 'SIGKILL');
+    } catch {
+      // Already gone, or the file is not the shape expected: nothing left to stop.
+    }
+  }
+  rmSync(workerDataDir, { recursive: true, force: true });
+});
+
 function runWorkerStart(): { stdout: string; exitCode: number } {
   const result = spawnSync('bun', [WORKER_SCRIPT, 'start'], {
     encoding: 'utf-8',
-    timeout: 60000
+    timeout: 60000,
+    env: workerEnv,
   });
   return { stdout: result.stdout?.trim() || '', exitCode: result.status || 0 };
 }
@@ -274,7 +325,8 @@ describe('worker-json-status', () => {
 
       const result = spawnSync('bun', [WORKER_SCRIPT, 'start'], {
         encoding: 'utf-8',
-        timeout: 60000
+        timeout: 60000,
+        env: workerEnv,
       });
 
       const stdout = result.stdout?.trim() || '';
