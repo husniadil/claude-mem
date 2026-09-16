@@ -282,17 +282,18 @@ export function snapshotResponseContext(session: ActiveSession): ResponseContext
 
 /**
  * An accepted reply proves the conversation fits and the provider is alive, so
- * the overflow and stall debts reset — but only when the reply answered queued
- * work. The init prompt is answered on every fresh generation, so letting it
- * reset the debt meant an oversized message or a too-small budget went
- * init -> reset -> recycle -> restart forever and never reached the exhausted
- * pause (#4066). With the Claude feed paced to one unanswered prompt,
+ * the overflow, stall and transport-retry debts reset — but only when the reply
+ * answered queued work. The init prompt is answered on every fresh generation,
+ * so letting it reset the debt meant an oversized message or a too-small budget
+ * went init -> reset -> recycle -> restart forever and never reached the
+ * exhausted pause (#4066). With the Claude feed paced to one unanswered prompt,
  * lastGeneratorSource names the prompt this reply answers.
  */
 function clearDebtForAnsweredWork(session: ActiveSession): void {
   if (session.lastGeneratorSource === 'init') return;
   session.consecutiveContextOverflows = 0;
   session.consecutiveResponseStalls = 0;
+  session.transportRetryAttempts = 0;
 }
 
 export async function processAgentResponse(
