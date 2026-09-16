@@ -65,6 +65,11 @@ export interface ActiveSession {
   pendingAgentType?: string | null;
   abortReason?: 'idle' | 'shutdown' | 'overflow' | 'restart-guard' | 'quota' | 'provider_switch' | string | null;
   respawnTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Retries spent on the current run of transport pauses. Reset whenever the
+   * provider answers a prompt, so separate outages each get the full schedule.
+   */
+  transportRetryAttempts?: number;
   /** When the latest compression prompt was dispatched to the model — telemetry compression_ms. */
   lastPromptSentAt?: number | null;
   /** Real token usage and provider-reported cost from the latest model response (never estimated) — telemetry tokens_input/output/cost_usd. */

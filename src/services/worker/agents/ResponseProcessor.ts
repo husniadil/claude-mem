@@ -411,6 +411,7 @@ export async function processAgentResponse(
     // counter resets here too. Resetting only on a valid parse let a generation
     // that answered "idle" twice in a row trip the exhausted branch and wedge.
     session.consecutiveContextOverflows = 0;
+    session.transportRetryAttempts = 0;
 
     // consecutiveInvalidOutputs is deliberately always 0 here (see worker-types),
     // so logging it read as "the breaker is fine" on every rejection and hid
@@ -435,6 +436,7 @@ export async function processAgentResponse(
   // counter so recycles only ever trip on *consecutive* failures.
   session.consecutiveInvalidOutputs = 0;
   session.consecutiveContextOverflows = 0;
+  session.transportRetryAttempts = 0;
 
   if (!session.memorySessionId) {
     logger.warn('SDK', 'memorySessionId not yet captured; deferring storage until next round', {

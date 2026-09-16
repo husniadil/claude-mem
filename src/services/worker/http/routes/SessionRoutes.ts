@@ -48,6 +48,14 @@ import type { TelegramWrapupFormatterInput } from '../../../integrations/Telegra
 const MAX_USER_PROMPT_BYTES = 256 * 1024;
 
 /**
+ * Delays before re-trying a generator that paused because the provider could
+ * not be reached (an overloaded 529, a dropped connection, a turn that never
+ * finished). One entry per attempt; once they run out the session waits for
+ * its next captured tool call, as every pause did before.
+ */
+export const TRANSPORT_RETRY_DELAYS_MS = [30_000, 120_000, 600_000];
+
+/**
  * Collapse session.abortReason onto a closed telemetry enum. The raw value can
  * carry free text after a colon (e.g. 'quota:<provider message>') — never emit
  * it verbatim. Unknown or absent reasons map to 'none'.
@@ -320,6 +328,41 @@ export class SessionRoutes extends BaseRouteHandler {
     );
   }
 
+  private scheduleTransportRetry(session: NonNullable<ReturnType<typeof this.sessionManager.getSession>>): void {
+    const sessionDbId = session.sessionDbId;
+    if (this.sessionManager.getMessageBuffer().getPendingCount(sessionDbId) === 0) return;
+
+    const attempt = session.transportRetryAttempts ?? 0;
+    const delayMs = TRANSPORT_RETRY_DELAYS_MS[attempt];
+    if (delayMs === undefined) {
+      logger.warn('SESSION', 'Transport retries exhausted; buffered work waits for the next captured tool call', {
+        sessionId: sessionDbId,
+        attempts: attempt,
+        pendingCount: this.sessionManager.getMessageBuffer().getPendingCount(sessionDbId),
+      });
+      return;
+    }
+    session.transportRetryAttempts = attempt + 1;
+
+    if (session.respawnTimer) clearTimeout(session.respawnTimer);
+    logger.info('SESSION', 'Scheduling observer retry after a transport pause', {
+      sessionId: sessionDbId,
+      attempt: attempt + 1,
+      retryInMs: delayMs,
+    });
+    const timer = setTimeout(() => {
+      if (session.respawnTimer === timer) session.respawnTimer = undefined;
+      void this.ensureGeneratorRunning(sessionDbId, 'transport-retry')
+        .catch(error => {
+          logger.error('SESSION', 'Failed to resume the observer after a transport pause', {
+            sessionId: sessionDbId,
+          }, error instanceof Error ? error : new Error(String(error)));
+        });
+    }, delayMs);
+    timer.unref?.();
+    session.respawnTimer = timer;
+  }
+
   private async startGeneratorWithProvider(
     session: ReturnType<typeof this.sessionManager.getSession>,
     provider: 'claude' | 'gemini' | 'openrouter',
@@ -539,6 +582,16 @@ export class SessionRoutes extends BaseRouteHandler {
               });
           }, 0);
           resume.unref?.();
+        }
+
+        // A transport pause preserves the batch and then waits for the next
+        // captured tool call, which never comes once the Claude Code session
+        // has ended: the work sat in RAM until a worker restart dropped it.
+        // Retry on a short, bounded schedule instead. Bounded, because an
+        // open-ended retry on pending work is the storm the durable queue
+        // was removed for.
+        if (reason?.startsWith('transport:')) {
+          this.scheduleTransportRetry(session);
         }
       });
     session.generatorPromise = generatorPromise;
