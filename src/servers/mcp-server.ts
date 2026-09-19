@@ -47,6 +47,7 @@ import { withCheckoutProjects } from './checkout-search-scope.js';
 import { postCorpusRequestOverSse } from './corpus-worker-stream.js';
 import { withWorkerRestartOnRefusedConnection } from './worker-restart.js';
 import { ProgressiveSearchError, progressiveSearchToolError } from '../shared/progressive-search.js';
+import { memoryPolicy, isOffered, describeTool, scopeArgs } from './mcp-memory-scope.js';
 import { formatMcpPayload, formatWorkerMcpResponse, mcpTextResult, workerFailureText, serverFailureText, type McpTextPurpose } from './mcp-text-format.js';
 
 /** This server's checkout (Claude Code starts it in the workspace), resolved once. */
@@ -1086,11 +1087,17 @@ function workStateEnabled(): boolean {
   return isWorkStateEnabled(loadFromFileOnce().CLAUDE_MEM_WORK_STATE_ENABLED);
 }
 
+// Read once: the session's project is its working directory, and a bad setting
+// stops the server at start rather than widening what a session can read.
+const memory = memoryPolicy(loadFromFileOnce(), process.cwd());
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const advertisedTools = withoutDisabledWorkStateTools(
     getAdvertisedMcpToolsForRuntime(tools, selectRuntime()),
     workStateEnabled(),
-  );
+  )
+    .filter(tool => isOffered(memory, tool.name))
+    .map(tool => describeTool(memory, tool));
   return {
     tools: advertisedTools.map(tool => ({
       name: tool.name,
@@ -1104,7 +1111,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const tool = tools.find(t => t.name === request.params.name);
 
-  if (!tool) {
+  if (!tool || !isOffered(memory, tool.name)) {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
@@ -1116,7 +1123,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
-    return await tool.handler(request.params.arguments || {});
+    return await tool.handler(scopeArgs(memory, tool.name, request.params.arguments || {}));
   } catch (error: unknown) {
     logger.error('SYSTEM', 'Tool execution failed', { tool: request.params.name }, error instanceof Error ? error : new Error(String(error)));
     return {
