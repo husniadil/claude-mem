@@ -57,6 +57,7 @@ import { withCheckoutProjects } from './checkout-search-scope.js';
 import { postCorpusRequestOverSse } from './corpus-worker-stream.js';
 import { withWorkerRestartOnRefusedConnection } from './worker-restart.js';
 import { ProgressiveSearchError, progressiveSearchToolError } from '../shared/progressive-search.js';
+import { memoryPolicy, isOffered, describeTool, scopeArgs } from './mcp-memory-scope.js';
 import { formatMcpPayload, formatWorkerMcpResponse, mcpTextResult, workerFailureText, serverFailureText, type McpTextPurpose } from './mcp-text-format.js';
 import { getRequestCwd, runWithCwd } from './request-context.js';
 import { parseHttpArgs, startMcpHttpServer, type CwdResolver, type McpHttpOptions } from './mcp-http.js';
@@ -1162,6 +1163,10 @@ function teamBrainJoined(): boolean {
   return teamBrainConnection(loadFromFileOnce()) !== null;
 }
 
+// Read once: the session's project is its working directory, and a bad setting
+// stops the server at start rather than widening what a session can read.
+const memory = memoryPolicy(loadFromFileOnce(), process.cwd());
+
 /**
  * One MCP Server. Over stdio there is exactly one; over HTTP every session gets its own.
  * `getCwd` returns the project directory of the request carrying a tool call, resolved
@@ -1185,7 +1190,9 @@ function createMcpServer(getCwd?: CwdResolver): Server {
     const advertisedTools = withoutUnjoinedTeamBrainTools(
       withoutDisabledWorkStateTools(getAdvertisedMcpToolsForRuntime(tools, selectRuntime()), workStateEnabled()),
       teamBrainJoined(),
-    );
+    )
+      .filter(tool => isOffered(memory, tool.name))
+      .map(tool => describeTool(memory, tool));
     return {
       tools: advertisedTools.map(tool => ({
         name: tool.name,
@@ -1199,7 +1206,7 @@ function createMcpServer(getCwd?: CwdResolver): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const tool = tools.find(t => t.name === request.params.name);
 
-    if (!tool) {
+    if (!tool || !isOffered(memory, tool.name)) {
       throw new Error(`Unknown tool: ${request.params.name}`);
     }
 
@@ -1223,7 +1230,7 @@ function createMcpServer(getCwd?: CwdResolver): Server {
     }
 
     try {
-      const args = request.params.arguments || {};
+      const args = scopeArgs(memory, tool.name, request.params.arguments || {});
       const result = await (getCwd ? runWithCwd(getCwd(extra), () => tool.handler(args)) : tool.handler(args));
       spoolWorkStateMcpResult(tool.name, result);
       return result;
