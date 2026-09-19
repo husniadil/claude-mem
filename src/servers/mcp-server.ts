@@ -40,6 +40,8 @@ import {
 } from '../services/hooks/runtime-selector.js';
 import { normalizePlatformSource } from '../shared/platform-source.js';
 import { getAdvertisedMcpToolsForRuntime } from './mcp-tool-visibility.js';
+import { loadFromFileOnce } from '../shared/hook-settings.js';
+import { memoryPolicy, isOffered, describeTool, scopeArgs } from './mcp-memory-scope.js';
 
 let mcpServerDirResolutionFailed = false;
 const mcpServerDir = (() => {
@@ -927,8 +929,14 @@ const server = new Server(
   }
 );
 
+// Read once: the session's project is its working directory, and a bad setting
+// stops the server at start rather than widening what a session can read.
+const memory = memoryPolicy(loadFromFileOnce(), process.cwd());
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const advertisedTools = getAdvertisedMcpToolsForRuntime(tools, selectRuntime());
+  const advertisedTools = getAdvertisedMcpToolsForRuntime(tools, selectRuntime())
+    .filter(tool => isOffered(memory, tool.name))
+    .map(tool => describeTool(memory, tool));
   return {
     tools: advertisedTools.map(tool => ({
       name: tool.name,
@@ -941,12 +949,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const tool = tools.find(t => t.name === request.params.name);
 
-  if (!tool) {
+  if (!tool || !isOffered(memory, tool.name)) {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
   try {
-    return await tool.handler(request.params.arguments || {});
+    return await tool.handler(scopeArgs(memory, tool.name, request.params.arguments || {}));
   } catch (error: unknown) {
     logger.error('SYSTEM', 'Tool execution failed', { tool: request.params.name }, error instanceof Error ? error : new Error(String(error)));
     return {

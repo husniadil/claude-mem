@@ -179,6 +179,18 @@ Claude-Mem provides MCP search tools for querying your project history.
 
 **No configuration required** - MCP tools are automatically available in Claude Code sessions.
 
+Two settings change what those tools read. Like every setting, an environment
+variable of the same name overrides `settings.json` for the sessions that
+inherit it, so one machine can hold some sessions to less.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CLAUDE_MEM_SEARCH_RECENCY_DAYS` | `90` | How far back `search` looks when the call gives no `dateStart`. `0` means no limit. The `search` tool's description states the value in use |
+| `CLAUDE_MEM_SEARCH_SCOPE` | `all` | `project` holds a session to its own project, named from its working directory as the hooks name it: every memory tool is called with that project, and the corpus and `observation_*` tools are not offered |
+
+The scope is applied by the MCP server, so it binds the model calling the
+tools. It does not stop a process that can reach the worker's HTTP port.
+
 Search operations are provided via:
 - **MCP Server**: 3 tools (search, timeline, get_observations) with progressive disclosure
 - **HTTP API**: 10 endpoints on the worker service port (per-user, default `37700 + (uid % 100)`; see `~/.claude-mem/settings.json`)
