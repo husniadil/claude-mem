@@ -2247,7 +2247,7 @@ export async function requireWorkerStopped(
   // (#2828). claude-mem never stops, kills or recycles it, and its manager
   // would restart it the moment it exited, so leave it running and say once
   // how to load the new version.
-  if (isWorkerAutostartDisabled({ CLAUDE_MEM_WORKER_AUTOSTART: getSetting('CLAUDE_MEM_WORKER_AUTOSTART') })) {
+  if (isWorkerAutostartDisabled({ CLAUDE_MEM_WORKER_AUTOSTART: getSetting('CLAUDE_MEM_WORKER_AUTOSTART'), CLAUDE_MEM_WORKER_URL: getSetting('CLAUDE_MEM_WORKER_URL') })) {
     if (phase === 'pre-overwrite') {
       installerError(ErrorSeverity.WARN_CONTINUE, {
         component: 'worker-shutdown',

@@ -176,6 +176,7 @@ export interface SettingsDefaults {
   CLAUDE_MEM_WORKER_HOST: string;
   CLAUDE_MEM_ALLOWED_ORIGINS: string;
   CLAUDE_MEM_PUBLIC_URL: string;
+  CLAUDE_MEM_WORKER_URL: string;
   CLAUDE_MEM_API_TIMEOUT_MS: string;
   CLAUDE_MEM_SESSION_INIT_TIMEOUT_MS: string;
   CLAUDE_MEM_IDLE_EXIT_SEC: string;  // Worker idle-exit window in seconds; '0' (default) = never idle-exit.
@@ -410,6 +411,7 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_PUBLIC_URL: '',  // Browser-reachable base for the live-view URL when the
                                 // worker runs behind a port-forward (e.g.
                                 // https://37700.host.<user>.<domain>). Empty => localhost.
+    CLAUDE_MEM_WORKER_URL: '',  // a worker behind a proxy, as http(s)://host[:port][/prefix]: replaces HOST and PORT for requests, and implies CLAUDE_MEM_WORKER_AUTOSTART=false
     CLAUDE_MEM_API_TIMEOUT_MS: String(getTimeout(HOOK_TIMEOUTS.API_REQUEST)),
     CLAUDE_MEM_SESSION_INIT_TIMEOUT_MS: String(defaultSessionInitRequestTimeoutMs()),  // 10s; 7s on Windows, whose hook start-up the budget never sees
     // Worker idle exit (opt-in; minimum 60): after this many seconds with no
