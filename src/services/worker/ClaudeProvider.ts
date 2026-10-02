@@ -11,7 +11,7 @@ import {
   resolveConfigDirProfileKey,
 } from '../../shared/EnvManager.js';
 import { findClaudeExecutable } from '../../shared/find-claude-executable.js';
-import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
+import type { ActiveSession, PendingMessageWithId, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import { processAgentResponse, snapshotResponseContext, takeObserverSchemaReminder, type WorkerRef } from './agents/index.js';
 import {
@@ -40,7 +40,9 @@ import {
   describeGenerationUsage,
   resolveConversationMaxChars,
   windowAwareConversationMaxChars,
+  observerBatchCeiling,
 } from '../../shared/observer-recycle.js';
+import { sameObservationContext } from './codex-observation-batch.js';
 import { resolveContextWindowTokens, observationFieldMaxChars } from './context-window.js';
 import { recycleObserverConversation, loadSessionStartContext, openObserverGeneration, observesBarePrompts } from './session/recycle-conversation.js';
 import { MAX_CONSECUTIVE_SDK_STREAM_EXITS, ObserverResponsePacer } from './session/response-pacer.js';
@@ -1189,7 +1191,10 @@ export class ClaudeProvider {
 
     // Each pass waits for the previous prompt's answer at the bottom of the loop,
     // BEFORE the iterator is pulled again, so nothing is claimed while a prompt
-    // is still unanswered (#4066).
+    // is still unanswered (#4066). The observations already buffered when a
+    // prompt is built go into that one prompt, up to a quarter of the budget, so
+    // a backlog drains a batch per turn instead of one observation per turn. The
+    // claimed ids are then exactly the batch being answered.
     for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
       session.pendingAgentId = message.agentId ?? null;
       session.pendingAgentType = message.agentType ?? null;
@@ -1199,11 +1204,12 @@ export class ClaudeProvider {
       }
 
       if (message.type === 'observation') {
+        const maxChars = this.conversationMaxChars(session);
         // Retire a full generation BEFORE yielding. The SDK holds the real
         // conversation server-side, but conversationHistory tracks every prompt
         // fed into it, so its size is the proxy for how close that conversation
         // is to the ceiling (#3800).
-        if (shouldRecycleConversation(session.conversationHistory, this.conversationMaxChars(session), session.lastContextTokens)) {
+        if (shouldRecycleConversation(session.conversationHistory, maxChars, session.lastContextTokens)) {
           await recycleObserverConversation(
             session,
             this.sessionManager,
@@ -1224,27 +1230,46 @@ export class ClaudeProvider {
           promptNumber: message.prompt_number ?? session.lastPromptNumber,
         };
         const fieldMaxChars = observationFieldMaxChars(session.observerContextWindowTokens);
-        const optimized = compressField
-          ? await optimizeObservationFields(
-              { toolInput: message.tool_input, toolOutput: message.tool_response },
-              compressField,
-              { sessionDbId: session.sessionDbId, toolName: message.tool_name },
-              fieldMaxChars,
-              resolveFieldOptimizeTimeoutMs,
-              session.observerContextWindowTokens,
-            )
-          : { toolInput: message.tool_input, toolOutput: message.tool_response };
+        const ceiling = observerBatchCeiling(maxChars);
+        // One reminder per drift, so only the batch's first observation restates the schema.
+        let restateSchema = takeObserverSchemaReminder(session);
+        const prompts: string[] = [];
+        let batchChars = 0;
+        let observed: PendingMessageWithId | null = message;
+        while (observed !== null) {
+          const optimized = compressField
+            ? await optimizeObservationFields(
+                { toolInput: observed.tool_input, toolOutput: observed.tool_response },
+                compressField,
+                { sessionDbId: session.sessionDbId, toolName: observed.tool_name },
+                fieldMaxChars,
+                resolveFieldOptimizeTimeoutMs,
+                session.observerContextWindowTokens,
+              )
+            : { toolInput: observed.tool_input, toolOutput: observed.tool_response };
 
-        const obsPrompt = buildObservationPrompt({
-          id: 0, // Not used in prompt
-          tool_name: message.tool_name!,
-          tool_input: JSON.stringify(optimized.toolInput),
-          tool_output: JSON.stringify(optimized.toolOutput),
-          created_at_epoch: Date.now(),
-          cwd: message.cwd
-        }, fieldMaxChars, takeObserverSchemaReminder(session));
+          const obsPrompt = buildObservationPrompt({
+            id: 0, // Not used in prompt
+            tool_name: observed.tool_name!,
+            tool_input: JSON.stringify(optimized.toolInput),
+            tool_output: JSON.stringify(optimized.toolOutput),
+            created_at_epoch: Date.now(),
+            cwd: observed.cwd
+          }, fieldMaxChars, restateSchema);
+          restateSchema = false;
+          prompts.push(obsPrompt);
+          batchChars += obsPrompt.length;
 
-        session.conversationHistory.push({ role: 'user', content: obsPrompt });
+          // Only an observation already buffered joins, so this never waits. It
+          // must share the first one's attribution context, which the reply is
+          // stored under once.
+          observed = batchChars < ceiling
+            ? this.sessionManager.claimNextObservation(session.sessionDbId, next => sameObservationContext(message, next))
+            : null;
+        }
+        const batchPrompt = prompts.join('\n\n');
+
+        session.conversationHistory.push({ role: 'user', content: batchPrompt });
 
         session.lastPromptSentAt = Date.now();
         session.lastGeneratorSource = 'ingest';
@@ -1253,7 +1278,7 @@ export class ClaudeProvider {
           type: 'user',
           message: {
             role: 'user',
-            content: withPendingInitPrompt(obsPrompt)
+            content: withPendingInitPrompt(batchPrompt)
           },
           session_id: session.contentSessionId,
           parent_tool_use_id: null,
