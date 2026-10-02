@@ -12,6 +12,7 @@ import {
 import { updateCursorContextForProject } from '../../integrations/CursorHooksInstaller.js';
 import { notifyTelegram } from '../../integrations/TelegramNotifier.js';
 import { notifyGrokBotAwareness } from '../../integrations/GrokBotAwarenessPusher.js';
+import { notifyGrokBotIndex } from '../../integrations/GrokBotIndexWriter.js';
 import { updateFolderClaudeMdFiles } from '../../../utils/claude-md-utils.js';
 import { getWorkerPort } from '../../../shared/worker-utils.js';
 import { recordObserverSuccess } from '../../../shared/observer-health.js';
@@ -279,6 +280,22 @@ export function snapshotResponseContext(session: ActiveSession): ResponseContext
   };
 }
 
+/**
+ * An accepted reply proves the conversation fits and the provider is alive, so
+ * the overflow, stall and transport-retry debts reset — but only when the reply
+ * answered queued work. The init prompt is answered on every fresh generation,
+ * so letting it reset the debt meant an oversized message or a too-small budget
+ * went init -> reset -> recycle -> restart forever and never reached the
+ * exhausted pause (#4066). With the Claude feed paced to one unanswered prompt,
+ * lastGeneratorSource names the prompt this reply answers.
+ */
+function clearDebtForAnsweredWork(session: ActiveSession): void {
+  if (session.lastGeneratorSource === 'init') return;
+  session.consecutiveContextOverflows = 0;
+  session.consecutiveResponseStalls = 0;
+  session.transportRetryAttempts = 0;
+}
+
 export async function processAgentResponse(
   text: string,
   session: ActiveSession,
@@ -410,8 +427,8 @@ export async function processAgentResponse(
     // conversation fits, whether or not the answer parsed — so the recycle
     // counter resets here too. Resetting only on a valid parse let a generation
     // that answered "idle" twice in a row trip the exhausted branch and wedge.
-    session.consecutiveContextOverflows = 0;
-    session.transportRetryAttempts = 0;
+    // An init reply does not count (#4066).
+    clearDebtForAnsweredWork(session);
 
     // consecutiveInvalidOutputs is deliberately always 0 here (see worker-types),
     // so logging it read as "the breaker is fine" on every rejection and hid
@@ -433,10 +450,10 @@ export async function processAgentResponse(
 
   // Valid parse — clear the invalid-output counter so transient misses don't
   // accumulate toward a respawn across a healthy session, and clear the overflow
-  // counter so recycles only ever trip on *consecutive* failures.
+  // counter so recycles only ever trip on *consecutive* failures (not on an
+  // init reply, #4066).
   session.consecutiveInvalidOutputs = 0;
-  session.consecutiveContextOverflows = 0;
-  session.transportRetryAttempts = 0;
+  clearDebtForAnsweredWork(session);
 
   if (!session.memorySessionId) {
     logger.warn('SDK', 'memorySessionId not yet captured; deferring storage until next round', {
@@ -636,6 +653,10 @@ export async function processAgentResponse(
     memorySessionId: session.memorySessionId,
     agentId: context.pendingAgentId,
   });
+
+  // Growing Grok Bot INDEX: any new observation (any project) can fill a
+  // thin seat diary via the house fallback, so refresh all mapped seats.
+  notifyGrokBotIndex();
 
   await syncAndBroadcastObservations(
     labeledObservations,

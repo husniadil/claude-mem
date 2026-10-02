@@ -99,7 +99,7 @@ describe('observer retries a transport pause on a bounded schedule', () => {
     let starts = 0;
     const { routes } = buildRoutes(session, async () => {
       starts += 1;
-      session.abortReason = 'transport:turn_timeout';
+      session.abortReason = 'transport:observer_text';
     }, () => 5);
 
     await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
@@ -124,6 +124,27 @@ describe('observer retries a transport pause on a bounded schedule', () => {
     await wait(30);
 
     expect(starts).toBe(1);
+  });
+
+  it('leaves a response stall to its own resume, with no transport retry on top', async () => {
+    const session = makeSession();
+    let starts = 0;
+    const { routes } = buildRoutes(session, async () => {
+      starts += 1;
+      session.abortReason = 'transport:response_stall';
+    }, () => 5);
+
+    await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+    await session.generatorPromise;
+    await wait(30);
+
+    // The stall resume waits 30s, so within this window only a transport retry
+    // (1ms here) could have started a second generation.
+    expect(starts).toBe(1);
+    expect(session.stallResumeTimer).toBeDefined();
+    expect(session.respawnTimer).toBeUndefined();
+    expect(session.transportRetryAttempts ?? 0).toBe(0);
+    clearTimeout(session.stallResumeTimer);
   });
 
   it('does not retry an auth pause', async () => {

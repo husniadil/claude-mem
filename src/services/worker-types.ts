@@ -51,11 +51,16 @@ export interface ActiveSession {
    */
   overflowPausedUntilMs?: number;
   /**
-   * Whether the observer is answering a turn, and the resolver of a generator
-   * waiting for it to finish. The generator sends one turn at a time (#4066).
+   * Consecutive generations that ended because a prompt went unanswered
+   * ('transport:response_stall'). Bounds their automatic resume; reset when a
+   * queued-work turn is answered (#4066).
    */
-  turnInFlight?: boolean;
-  turnWaiter?: (() => void) | null;
+  consecutiveResponseStalls?: number;
+  /**
+   * The delayed resume a response stall scheduled. Any generator start cancels
+   * it, so a stale timer never restarts a session a newer generation paused.
+   */
+  stallResumeTimer?: ReturnType<typeof setTimeout>;
   forceInit?: boolean;
   idleTimedOut?: boolean;  
   lastGeneratorActivity: number;
@@ -66,8 +71,9 @@ export interface ActiveSession {
   abortReason?: 'idle' | 'shutdown' | 'overflow' | 'restart-guard' | 'quota' | 'provider_switch' | string | null;
   respawnTimer?: ReturnType<typeof setTimeout>;
   /**
-   * Retries spent on the current run of transport pauses. Reset whenever the
-   * provider answers a prompt, so separate outages each get the full schedule.
+   * Retries spent on the current run of transport pauses. Reset when a
+   * queued-work turn is answered, so separate outages each get the full
+   * schedule. An init reply does not count (#4066).
    */
   transportRetryAttempts?: number;
   /** When the latest compression prompt was dispatched to the model — telemetry compression_ms. */

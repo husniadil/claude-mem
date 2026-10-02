@@ -7,7 +7,7 @@ import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js
 import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir, paths } from '../../shared/paths.js';
 import { buildIsolatedEnvWithFreshOAuth, getAuthMethodDescription } from '../../shared/EnvManager.js';
 import { findClaudeExecutable } from '../../shared/find-claude-executable.js';
-import type { ActiveSession, PendingMessage, SDKUserMessage } from '../worker-types.js';
+import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import { processAgentResponse, snapshotResponseContext, type WorkerRef } from './agents/index.js';
 import {
@@ -32,10 +32,11 @@ import { resolveSummaryTierModel, resolveTierAlias } from './model-aliases.js';
 import {
   shouldRecycleConversation,
   conversationChars,
-  observerBatchCeiling,
   resolveConversationMaxChars,
 } from '../../shared/observer-recycle.js';
 import { recycleObserverConversation, loadSessionStartContext } from './session/recycle-conversation.js';
+import { ObserverResponsePacer } from './session/response-pacer.js';
+import { IDLE_TIMEOUT_MS } from './SessionMessageBuffer.js';
 import { optimizeObservationFields, buildFieldCompressionPrompt, type FieldCompressor } from './field-optimizer.js';
 import { buildTelegramWrapupPrompt, type TelegramWrapupFormatterInput } from '../integrations/TelegramWrapupNotifier.js';
 import { telemetryBuffer } from '../telemetry/buffer.js';
@@ -174,35 +175,20 @@ export function classifyClaudeError(err: unknown): ClassifiedProviderError {
   return new ClassifiedProviderError(message, { kind: 'transient', cause: err });
 }
 
-/** Longest the observer may take over one turn before its batch is handed back (#4066). */
-const OBSERVER_TURN_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
- * Whether the next buffered message may share the current batch's turn. A
- * summary is its own turn, and the agent and prompt a stored observation is
- * attributed to are read from the session once per turn, so a batch keeps to
- * one of each.
- */
-function joinsBatch(current: PendingMessage, upcoming: PendingMessage): boolean {
-  return (
-    upcoming.type === 'observation' &&
-    (upcoming.agentId ?? null) === (current.agentId ?? null) &&
-    (upcoming.agentType ?? null) === (current.agentType ?? null) &&
-    (upcoming.prompt_number ?? null) === (current.prompt_number ?? null)
-  );
-}
-
 export class ClaudeProvider {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
-  /** How long one observer turn may run; a field so tests can shorten it. */
-  private turnTimeoutMs = OBSERVER_TURN_TIMEOUT_MS;
 
   /** Character budget for one observer generation, operator-overridable (#3800). */
   private conversationMaxChars(): number {
     return resolveConversationMaxChars(
       SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH).CLAUDE_MEM_OBSERVER_MAX_CONVERSATION_CHARS
     );
+  }
+
+  /** How long an unanswered prompt may go without SDK activity (#4066). */
+  private responseStallMs(): number {
+    return IDLE_TIMEOUT_MS;
   }
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
@@ -259,7 +245,9 @@ export class ClaudeProvider {
     const activeResponseContext = { current: snapshotResponseContext(session) };
     const compressField: FieldCompressor = (text, budgetChars, signal) =>
       this.compressField(text, budgetChars, session, modelId, claudePath, signal);
-    const messageGenerator = this.createMessageGenerator(session, cwdTracker, activeResponseContext, worker, compressField);
+    // Paces the streaming feed to one unanswered prompt per generation (#4066).
+    const pacer = new ObserverResponsePacer();
+    const messageGenerator = this.createMessageGenerator(session, cwdTracker, activeResponseContext, worker, compressField, pacer);
 
     this.resetCarriedMemorySessionId(session);
 
@@ -344,6 +332,16 @@ export class ClaudeProvider {
       let retriedAfterErrorResult = false;
 
       for await (const message of queryResult) {
+        // A stall already handed the claimed batch back to pending; a frame
+        // processed now would be stored twice once the batch is re-sent (#4066).
+        if (pacer.hasStalled) break;
+        // Any SDK message means the turn is alive, so the feed's stall window
+        // restarts; an announced API retry also buys its backoff delay (#4066).
+        pacer.activity(
+          message.type === 'system' && message.subtype === 'api_retry' && typeof message.retry_delay_ms === 'number'
+            ? message.retry_delay_ms
+            : 0,
+        );
         // Quota-aware wall-clock guard (#2234): the SDK pushes
         // `rate_limit_event` messages carrying live subscription quota state
         // (see extractRateLimitInfo for the shape). Capture the snapshot, then
@@ -593,10 +591,17 @@ export class ClaudeProvider {
             retriedAfterErrorResult = false;
           }
           turnDispatchedText = false;
-          this.settleTurn(session);
+          // The result frame is the one turn boundary every outcome passes
+          // through — XML, empty/prose, and the failed-turn re-queue above,
+          // which never reaches processAgentResponse. Opening the feed per text
+          // frame instead would let a multi-frame turn release it early (#4066).
+          pacer.answer();
         }
       }
     } finally {
+      // Whatever ended the stream (throw, quota break, abort), nothing will
+      // answer the feed's last prompt any more.
+      pacer.close();
       // Safety net for paths where the SDK never invoked the spawn factory;
       // a leaked reservation would occupy an agent slot until worker restart.
       slotReservation.release();
@@ -716,67 +721,13 @@ export class ClaudeProvider {
     return text;
   }
 
-  /**
-   * The observer finished a turn. Release the generator waiting to send the
-   * next one (#4066).
-   */
-  private settleTurn(session: ActiveSession): void {
-    session.turnInFlight = false;
-    const waiter = session.turnWaiter;
-    session.turnWaiter = null;
-    waiter?.();
-  }
-
-  /**
-   * Wait until no turn is in flight. True when the generator may send, false
-   * when it must stop: the session was aborted, or the turn outlived
-   * turnTimeoutMs, in which case its batch goes back to the buffer and the
-   * generator exits the way a transport failure does, so the next ingest opens
-   * a fresh one.
-   */
-  private async waitForTurn(session: ActiveSession): Promise<boolean> {
-    const signal = session.abortController.signal;
-    if (signal.aborted) return false;
-    if (!session.turnInFlight) return true;
-
-    const outcome = await new Promise<'answered' | 'aborted' | 'timeout'>((resolve) => {
-      const finish = (result: 'answered' | 'aborted' | 'timeout') => {
-        clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
-        if (session.turnWaiter === onAnswer) session.turnWaiter = null;
-        resolve(result);
-      };
-      const onAnswer = () => finish('answered');
-      const onAbort = () => finish('aborted');
-      const timer = setTimeout(() => finish('timeout'), this.turnTimeoutMs);
-      signal.addEventListener('abort', onAbort, { once: true });
-      session.turnWaiter = onAnswer;
-    });
-
-    if (outcome === 'answered') return true;
-    if (outcome === 'timeout') {
-      logger.warn('SESSION', 'Observer turn did not finish in time; preserving its batch and restarting the observer', {
-        sessionId: session.sessionDbId,
-        waitedMs: this.turnTimeoutMs,
-        claimed: session.claimedMessageIds.length,
-      });
-      await this.sessionManager.resetProcessingToPending(session.sessionDbId);
-      session.abortReason = 'transport:turn_timeout';
-      try {
-        session.abortController.abort();
-      } catch {
-        // best-effort; AbortController.abort() should not throw in normal use.
-      }
-    }
-    return false;
-  }
-
   private async *createMessageGenerator(
     session: ActiveSession,
     cwdTracker: { lastCwd: string | undefined },
     activeResponseContext: { current: ReturnType<typeof snapshotResponseContext> },
     worker?: WorkerRef,
     compressField?: FieldCompressor,
+    pacer: ObserverResponsePacer = new ObserverResponsePacer(),
   ): AsyncIterableIterator<SDKUserMessage> {
     const mode = ModeManager.getInstance().getActiveMode();
 
@@ -789,6 +740,12 @@ export class ClaudeProvider {
       promptType: isInitPrompt ? 'INIT' : 'CONTINUATION'
     });
 
+    // Release claims a previous generation left unconfirmed (a quota-guard
+    // abort does not reset them) BEFORE the init prompt goes out. The iterator
+    // resets them too, but only once the init reply has been awaited — and that
+    // reply would otherwise confirm the stale claim unanswered (#4066).
+    await this.sessionManager.resetProcessingToPending(session.sessionDbId);
+
     // Brief the generation with the same session-start context a new Claude Code
     // session gets, so a conversation that starts partway through continues from
     // the memory rather than from nothing (#3800).
@@ -796,70 +753,46 @@ export class ClaudeProvider {
     const initPrompt = isInitPrompt
       ? buildInitPrompt(session.project, session.contentSessionId, session.userPrompt, mode, priorContext)
       : buildContinuationPrompt(session.userPrompt, session.lastPromptNumber, session.contentSessionId, mode, priorContext);
+    activeResponseContext.current = snapshotResponseContext(session);
 
-    const send = (content: string, source: string): SDKUserMessage => {
-      activeResponseContext.current = snapshotResponseContext(session);
-      session.conversationHistory.push({ role: 'user', content });
-      session.lastPromptSentAt = Date.now();
-      session.lastGeneratorSource = source;
-      session.turnInFlight = true;
-      return {
-        type: 'user',
-        message: { role: 'user', content },
-        session_id: session.contentSessionId,
-        parent_tool_use_id: null,
-        isSynthetic: true
-      };
+    session.conversationHistory.push({ role: 'user', content: initPrompt });
+
+    session.lastPromptSentAt = Date.now();
+    session.lastGeneratorSource = 'init';
+    let answeredBeforeSend = pacer.mark();
+    yield {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: initPrompt
+      },
+      session_id: session.contentSessionId,
+      parent_tool_use_id: null,
+      isSynthetic: true
     };
+    if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
 
-    session.turnWaiter = null;
-    yield send(initPrompt, 'init');
+    // Each pass waits for the previous prompt's answer at the bottom of the loop,
+    // BEFORE the iterator is pulled again, so nothing is claimed while a prompt
+    // is still unanswered (#4066).
+    for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
+      session.pendingAgentId = message.agentId ?? null;
+      session.pendingAgentType = message.agentType ?? null;
 
-    // ONE TURN AT A TIME (#4066). The observer is sent a message only when its
-    // previous turn has finished, and everything it is sent in one turn is one
-    // user message. So the claimed ids are exactly the batch the model is
-    // answering: a response confirms what it read and nothing queued behind it,
-    // a recycle hands back only that batch, and the budget is only ever reached
-    // on answered history. Yielding each buffered observation as the SDK pulled
-    // it let a backlog fill the budget before the first answer, and let that
-    // answer confirm messages the model had not seen.
-    const buffer = this.sessionManager.getMessageBuffer();
-    const messages = this.sessionManager.getMessageIterator(session.sessionDbId);
-    try {
-      while (await this.waitForTurn(session)) {
-        const next = await messages.next();
-        if (next.done) return;
-        let message = next.value;
+      if (message.cwd) {
+        cwdTracker.lastCwd = message.cwd;
+      }
 
-        session.pendingAgentId = message.agentId ?? null;
-        session.pendingAgentType = message.agentType ?? null;
-        if (message.cwd) {
-          cwdTracker.lastCwd = message.cwd;
+      if (message.type === 'observation') {
+        if (message.prompt_number !== undefined) {
+          session.lastPromptNumber = message.prompt_number;
         }
 
-        if (message.type === 'summarize') {
-          const summaryPrompt = buildSummaryPrompt({
-            id: session.sessionDbId,
-            memory_session_id: session.memorySessionId,
-            project: session.project,
-            user_prompt: session.userPrompt,
-            last_assistant_message: message.last_assistant_message || ''
-          }, mode);
-          yield send(summaryPrompt, 'summarize');
-          continue;
-        }
-
-        if (message.type !== 'observation') {
-          continue;
-        }
-
-        const maxChars = this.conversationMaxChars();
-        // Retire a full generation BEFORE sending. The SDK holds the real
+        // Retire a full generation BEFORE yielding. The SDK holds the real
         // conversation server-side, but conversationHistory tracks every prompt
         // fed into it, so its size is the proxy for how close that conversation
-        // is to the ceiling (#3800). No turn is in flight here, so the history
-        // is answered and the recycle hands back only the message just claimed.
-        if (shouldRecycleConversation(session.conversationHistory, maxChars)) {
+        // is to the ceiling (#3800).
+        if (shouldRecycleConversation(session.conversationHistory, this.conversationMaxChars())) {
           await recycleObserverConversation(
             session,
             this.sessionManager,
@@ -870,51 +803,110 @@ export class ClaudeProvider {
           return;
         }
 
-        const ceiling = observerBatchCeiling(maxChars);
-        const prompts: string[] = [];
-        let batchChars = 0;
-        for (;;) {
-          if (message.prompt_number !== undefined) {
-            session.lastPromptNumber = message.prompt_number;
-          }
+        // An oversized payload is condensed by a bounded model pass before the
+        // prompt is built, so the observation carries a summary of the whole
+        // field rather than a head/tail slice with the middle cut out (#3800).
+        const optimized = compressField
+          ? await optimizeObservationFields(
+              { toolInput: message.tool_input, toolOutput: message.tool_response },
+              compressField,
+              { sessionDbId: session.sessionDbId, toolName: message.tool_name },
+            )
+          : { toolInput: message.tool_input, toolOutput: message.tool_response };
 
-          // An oversized payload is condensed by a bounded model pass before the
-          // prompt is built, so the observation carries a summary of the whole
-          // field rather than a head/tail slice with the middle cut out (#3800).
-          const optimized = compressField
-            ? await optimizeObservationFields(
-                { toolInput: message.tool_input, toolOutput: message.tool_response },
-                compressField,
-                { sessionDbId: session.sessionDbId, toolName: message.tool_name },
-              )
-            : { toolInput: message.tool_input, toolOutput: message.tool_response };
+        const obsPrompt = buildObservationPrompt({
+          id: 0, // Not used in prompt
+          tool_name: message.tool_name!,
+          tool_input: JSON.stringify(optimized.toolInput),
+          tool_output: JSON.stringify(optimized.toolOutput),
+          created_at_epoch: Date.now(),
+          cwd: message.cwd
+        });
+        activeResponseContext.current = snapshotResponseContext(session);
 
-          const obsPrompt = buildObservationPrompt({
-            id: 0, // Not used in prompt
-            tool_name: message.tool_name!,
-            tool_input: JSON.stringify(optimized.toolInput),
-            tool_output: JSON.stringify(optimized.toolOutput),
-            created_at_epoch: Date.now(),
-            cwd: message.cwd
-          });
-          prompts.push(obsPrompt);
-          batchChars += obsPrompt.length;
+        session.conversationHistory.push({ role: 'user', content: obsPrompt });
 
-          const upcoming = buffer.peekNextUnclaimed(session.sessionDbId);
-          if (!upcoming || batchChars >= ceiling || !joinsBatch(message, upcoming)) break;
-          const following = await messages.next();
-          if (following.done) break;
-          message = following.value;
-          if (message.cwd) {
-            cwdTracker.lastCwd = message.cwd;
-          }
-        }
+        session.lastPromptSentAt = Date.now();
+        session.lastGeneratorSource = 'ingest';
+        answeredBeforeSend = pacer.mark();
+        yield {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: obsPrompt
+          },
+          session_id: session.contentSessionId,
+          parent_tool_use_id: null,
+          isSynthetic: true
+        };
+        if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
+      } else if (message.type === 'summarize') {
+        const summaryPrompt = buildSummaryPrompt({
+          id: session.sessionDbId,
+          memory_session_id: session.memorySessionId,
+          project: session.project,
+          user_prompt: session.userPrompt,
+          last_assistant_message: message.last_assistant_message || ''
+        }, mode);
+        activeResponseContext.current = snapshotResponseContext(session);
 
-        yield send(prompts.join('\n\n'), 'ingest');
+        session.conversationHistory.push({ role: 'user', content: summaryPrompt });
+
+        session.lastPromptSentAt = Date.now();
+        session.lastGeneratorSource = 'summarize';
+        answeredBeforeSend = pacer.mark();
+        yield {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: summaryPrompt
+          },
+          session_id: session.contentSessionId,
+          parent_tool_use_id: null,
+          isSynthetic: true
+        };
+        if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
       }
-    } finally {
-      await messages.return?.(undefined);
     }
+  }
+
+  /**
+   * Hold the feed until the prompt just yielded has been answered (#4066).
+   * Returns false when the generator should end instead of pulling more work.
+   *
+   * The wait sits outside the drain, so a slow reply never counts as drain
+   * idleness. Nothing else watches a live-but-silent SDK child, though: the
+   * drain's idle timeout used to catch it once the unpaced feed had claimed
+   * everything. The same window is applied here, but a stall preserves the
+   * claimed batch ('transport' exit) instead of finalizing the session and
+   * dropping the backlog the way an idle exit does.
+   */
+  private async awaitObserverAnswer(
+    session: ActiveSession,
+    pacer: ObserverResponsePacer,
+    answeredBeforeSend: number,
+  ): Promise<boolean> {
+    const stallMs = this.responseStallMs();
+    const outcome = await pacer.waitForAnswer(answeredBeforeSend, session.abortController.signal, stallMs);
+    if (outcome === 'answered') return !session.abortController.signal.aborted;
+    if (outcome === 'stalled') {
+      logger.warn('SDK', 'Observer prompt went unanswered; preserving the claimed batch and stopping this generation', {
+        sessionId: session.sessionDbId,
+        waitedMs: stallMs,
+        claimed: session.claimedMessageIds.length,
+      });
+      // Abort before releasing the claims: the pacer has already fenced the SDK
+      // loop, and killing the stream first means no late frame can be processed
+      // between the release and the abort.
+      session.abortReason = 'transport:response_stall';
+      try {
+        session.abortController.abort();
+      } catch {
+        // best-effort
+      }
+      await this.sessionManager.resetProcessingToPending(session.sessionDbId);
+    }
+    return false;
   }
 
   private getModelId(): string {
