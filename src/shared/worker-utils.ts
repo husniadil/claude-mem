@@ -263,7 +263,30 @@ export function formatHostForUrl(host: string): string {
   return host.includes(':') ? `[${host}]` : host;
 }
 
+/**
+ * The base of `CLAUDE_MEM_WORKER_URL`, without a trailing slash, or null when it
+ * is unset. A worker behind an HTTPS proxy cannot be named by HOST and PORT,
+ * which always build a plain `http://` URL, and an http request that the proxy
+ * redirects to https loses its POST body on the way.
+ */
+export function parseWorkerBaseUrl(raw: string | undefined): string | null {
+  const value = (raw ?? '').trim();
+  if (value === '') return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`CLAUDE_MEM_WORKER_URL must be an http or https URL, not "${value}"`);
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.search || url.hash) {
+    throw new Error(`CLAUDE_MEM_WORKER_URL must be an http or https URL with no query or fragment, not "${value}"`);
+  }
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+}
+
 export function buildWorkerUrl(apiPath: string): string {
+  const baseUrl = parseWorkerBaseUrl(getWorkerSettings().CLAUDE_MEM_WORKER_URL);
+  if (baseUrl !== null) return `${baseUrl}${apiPath}`;
   return `http://${formatHostForUrl(getWorkerHost())}:${getWorkerPort()}${apiPath}`;
 }
 

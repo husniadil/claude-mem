@@ -174,6 +174,9 @@ export function releaseSpawnLock(): void {
  * continues without memory and the operator has one thing to fix instead of
  * two datasets to reconcile.
  *
+ * A `CLAUDE_MEM_WORKER_URL` names a worker elsewhere by definition, so it
+ * implies this as well.
+ *
  * Read from the settings FILE rather than `SettingsDefaultsManager.get()`,
  * which consults only `process.env` and the compiled defaults: a value written
  * to `~/.claude-mem/settings.json` would be invisible to it (the same reason
@@ -184,7 +187,10 @@ export function isRemoteWorkerOnly(): boolean {
     const settings = SettingsDefaultsManager.loadFromFile(
       join(resolveDataDir(), 'settings.json'),
     );
-    return (settings.CLAUDE_MEM_REMOTE_WORKER_ONLY ?? '').trim().toLowerCase() === 'true';
+    return (
+      (settings.CLAUDE_MEM_REMOTE_WORKER_ONLY ?? '').trim().toLowerCase() === 'true' ||
+      (settings.CLAUDE_MEM_WORKER_URL ?? '').trim() !== ''
+    );
   } catch {
     // Unreadable settings must not turn into a refusal to start the worker:
     // the default posture is the one this project shipped with.
