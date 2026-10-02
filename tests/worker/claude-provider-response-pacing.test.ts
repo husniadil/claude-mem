@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, mock } from 'bun:test';
-import type { ActiveSession } from '../../src/services/worker-types.js';
+import type { ActiveSession, PendingMessage } from '../../src/services/worker-types.js';
 
 // #4066: the Claude feed claimed and yielded a whole backlog before the model
 // answered anything, so the generation budget tripped on unanswered prompts and
@@ -206,7 +206,12 @@ function createSession(): ActiveSession {
   } as ActiveSession;
 }
 
-function createHarness(backlog: number, payloadChars = 200) {
+/**
+ * Each queued observation gets its own prompt number unless `sharedPromptNumber`
+ * is given, so none joins another's batch and every observation is its own
+ * prompt. The batching tests pass one shared number.
+ */
+function createHarness(backlog: number, payloadChars = 200, sharedPromptNumber?: number) {
   const dbManager = {
     getSessionById: () => ({ project: 'observer-project', memory_session_id: null }),
     getSessionStore: () => ({
@@ -227,7 +232,7 @@ function createHarness(backlog: number, payloadChars = 200) {
       tool_name: 'Bash',
       tool_input: { command: `step ${i}` },
       tool_response: `${i}:`.padEnd(payloadChars, 'x'),
-      prompt_number: 2,
+      prompt_number: sharedPromptNumber ?? 2 + i,
       toolUseId: `toolu_${i}`,
     });
   }
@@ -628,5 +633,146 @@ describe('response-stall resume policy', () => {
     }
     expect(decisions.slice(0, MAX_CONSECUTIVE_STALL_RESUMES).every(d => d.resume)).toBe(true);
     expect(decisions[MAX_CONSECUTIVE_STALL_RESUMES]).toEqual({ resume: false, attempts: MAX_CONSECUTIVE_STALL_RESUMES + 1 });
+  });
+});
+
+describe('Claude observer batching (husni fork)', () => {
+  function observation(n: number, overrides: Partial<PendingMessage> = {}): PendingMessage {
+    return {
+      type: 'observation',
+      tool_name: 'Bash',
+      tool_input: { command: `extra ${n}` },
+      tool_response: `extra ${n}`,
+      prompt_number: 2,
+      toolUseId: `toolu_extra_${n}`,
+      ...overrides,
+    };
+  }
+
+  it('sends what is buffered as one prompt, and one answer confirms the whole batch', async () => {
+    const h = createHarness(5, 200, 2);
+    liveSessions.push(h.session);
+    const run = h.provider.startSession(h.session);
+    await sdkStarted();
+
+    await sdk().until(() => sdk().prompts.length >= 1, 'init prompt');
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length >= 2, 'batch prompt');
+    await settle();
+    expect(sdk().prompts.length).toBe(2);
+    for (let i = 0; i < 5; i++) expect(sdk().prompts[1]).toContain(`step ${i}`);
+    expect(h.session.claimedMessageIds.length).toBe(5);
+
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => h.pending() === 0, 'batch confirmed');
+    expect(h.session.claimedMessageIds).toEqual([]);
+
+    h.session.abortController.abort();
+    await withTimeout(run, 'startSession after abort');
+  });
+
+  it('closes a batch once it reaches a quarter of the budget', async () => {
+    const h = createHarness(40, 1_000, 2);
+    liveSessions.push(h.session);
+    (h.provider as any).conversationMaxChars = () => 40_000;
+    const run = h.provider.startSession(h.session);
+    await sdkStarted();
+
+    await sdk().until(() => sdk().prompts.length >= 1, 'init prompt');
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length >= 2, 'first batch');
+    await settle();
+    const first = h.session.claimedMessageIds.length;
+    expect(first).toBeGreaterThan(1);
+    expect(first).toBeLessThan(40);
+    // At least the ceiling, and past it by no more than the one observation that crossed it.
+    expect(sdk().prompts[1].length).toBeGreaterThanOrEqual(10_000);
+    expect(sdk().prompts[1].length).toBeLessThan(10_000 + 2_000);
+
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length >= 3, 'second batch');
+    expect(sdk().prompts[2]).toContain(`step ${first}`);
+    expect(h.pending()).toBe(40 - first);
+
+    h.session.abortController.abort();
+    await withTimeout(run, 'startSession after abort');
+  });
+
+  it('starts a new prompt for a summary, another prompt number or another agent', async () => {
+    const h = createHarness(0);
+    liveSessions.push(h.session);
+    const buffer = h.sessionManager.getMessageBuffer();
+    buffer.enqueue(SESSION_ID, observation(1));
+    buffer.enqueue(SESSION_ID, observation(2));
+    buffer.enqueue(SESSION_ID, observation(3, { prompt_number: 3 }));
+    buffer.enqueue(SESSION_ID, { type: 'summarize', last_assistant_message: 'done for now' });
+    buffer.enqueue(SESSION_ID, observation(4, { prompt_number: 3 }));
+    buffer.enqueue(SESSION_ID, observation(5, { prompt_number: 3, agentId: 'agent-b', agentType: 'Explore' }));
+
+    const run = h.provider.startSession(h.session);
+    await sdkStarted();
+    await sdk().until(() => sdk().prompts.length >= 1, 'init prompt');
+
+    const expected: Array<{ has: string[]; lacks: string[] }> = [
+      { has: ['extra 1', 'extra 2'], lacks: ['extra 3'] },
+      { has: ['extra 3'], lacks: ['extra 4'] },
+      { has: ['done for now'], lacks: ['extra 4'] },
+      { has: ['extra 4'], lacks: ['extra 5'] },
+      { has: ['extra 5'], lacks: [] },
+    ];
+    for (const [i, turn] of expected.entries()) {
+      sdk().answer(SKIP_REPLY);
+      await sdk().until(() => sdk().prompts.length >= i + 2, `prompt ${i + 2}`);
+      const prompt = sdk().prompts[i + 1];
+      for (const text of turn.has) expect(prompt).toContain(text);
+      for (const text of turn.lacks) expect(prompt).not.toContain(text);
+    }
+
+    h.session.abortController.abort();
+    await withTimeout(run, 'startSession after abort');
+  });
+
+  it('leaves what arrives while a prompt is unanswered for the next prompt', async () => {
+    const h = createHarness(2, 200, 2);
+    liveSessions.push(h.session);
+    const run = h.provider.startSession(h.session);
+    await sdkStarted();
+
+    await sdk().until(() => sdk().prompts.length >= 1, 'init prompt');
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length >= 2, 'first batch');
+    expect(h.session.claimedMessageIds.length).toBe(2);
+
+    const buffer = h.sessionManager.getMessageBuffer();
+    for (let n = 1; n <= 3; n++) buffer.enqueue(SESSION_ID, observation(n));
+    await settle();
+    expect(sdk().prompts.length).toBe(2);
+    expect(h.session.claimedMessageIds.length).toBe(2);
+
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length >= 3, 'second batch');
+    for (let n = 1; n <= 3; n++) expect(sdk().prompts[2]).toContain(`extra ${n}`);
+    expect(h.session.claimedMessageIds.length).toBe(3);
+
+    h.session.abortController.abort();
+    await withTimeout(run, 'startSession after abort');
+  });
+
+  it('hands the whole batch back when its prompt stalls', async () => {
+    const h = createHarness(3, 200, 2);
+    liveSessions.push(h.session);
+    (h.provider as any).responseStallMs = () => 50;
+    const run = h.provider.startSession(h.session);
+    await sdkStarted();
+
+    await sdk().until(() => sdk().prompts.length >= 1, 'init prompt');
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length >= 2, 'batch prompt');
+    expect(h.session.claimedMessageIds.length).toBe(3);
+
+    await withTimeout(run, 'startSession after stall', 5_000);
+    expect(h.session.abortReason).toBe('transport:response_stall');
+    expect(h.session.claimedMessageIds).toEqual([]);
+    expect(h.pending()).toBe(3);
   });
 });

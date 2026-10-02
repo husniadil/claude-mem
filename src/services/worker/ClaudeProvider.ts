@@ -7,7 +7,7 @@ import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js
 import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir, paths } from '../../shared/paths.js';
 import { buildIsolatedEnvWithFreshOAuth, getAuthMethodDescription } from '../../shared/EnvManager.js';
 import { findClaudeExecutable } from '../../shared/find-claude-executable.js';
-import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
+import type { ActiveSession, PendingMessage, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import { processAgentResponse, snapshotResponseContext, type WorkerRef } from './agents/index.js';
 import {
@@ -33,6 +33,7 @@ import {
   shouldRecycleConversation,
   conversationChars,
   resolveConversationMaxChars,
+  observerBatchCeiling,
 } from '../../shared/observer-recycle.js';
 import { recycleObserverConversation, loadSessionStartContext } from './session/recycle-conversation.js';
 import { ObserverResponsePacer } from './session/response-pacer.js';
@@ -173,6 +174,21 @@ export function classifyClaudeError(err: unknown): ClassifiedProviderError {
   // Default: treat unknown errors as transient (preserve old behavior of
   // retrying everything not explicitly marked unrecoverable).
   return new ClassifiedProviderError(message, { kind: 'transient', cause: err });
+}
+
+/**
+ * Whether the next buffered message may share the current batch's prompt. A
+ * summary is its own prompt, and the agent and prompt number a stored
+ * observation is attributed to are read from the session once per prompt, so a
+ * batch keeps to one of each.
+ */
+function joinsBatch(current: PendingMessage, upcoming: PendingMessage): boolean {
+  return (
+    upcoming.type === 'observation' &&
+    (upcoming.agentId ?? null) === (current.agentId ?? null) &&
+    (upcoming.agentType ?? null) === (current.agentType ?? null) &&
+    (upcoming.prompt_number ?? null) === (current.prompt_number ?? null)
+  );
 }
 
 export class ClaudeProvider {
@@ -774,99 +790,131 @@ export class ClaudeProvider {
 
     // Each pass waits for the previous prompt's answer at the bottom of the loop,
     // BEFORE the iterator is pulled again, so nothing is claimed while a prompt
-    // is still unanswered (#4066).
-    for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
-      session.pendingAgentId = message.agentId ?? null;
-      session.pendingAgentType = message.agentType ?? null;
+    // is still unanswered (#4066). The observations already buffered when a
+    // prompt is built go into that one prompt, up to a quarter of the budget, so
+    // a backlog drains a batch per turn instead of one observation per turn. The
+    // claimed ids are then exactly the batch being answered.
+    const buffer = this.sessionManager.getMessageBuffer();
+    const messages = this.sessionManager.getMessageIterator(session.sessionDbId);
+    try {
+      for (;;) {
+        const next = await messages.next();
+        if (next.done) return;
+        let message = next.value;
 
-      if (message.cwd) {
-        cwdTracker.lastCwd = message.cwd;
-      }
+        session.pendingAgentId = message.agentId ?? null;
+        session.pendingAgentType = message.agentType ?? null;
 
-      if (message.type === 'observation') {
-        if (message.prompt_number !== undefined) {
-          session.lastPromptNumber = message.prompt_number;
+        if (message.cwd) {
+          cwdTracker.lastCwd = message.cwd;
         }
 
-        // Retire a full generation BEFORE yielding. The SDK holds the real
-        // conversation server-side, but conversationHistory tracks every prompt
-        // fed into it, so its size is the proxy for how close that conversation
-        // is to the ceiling (#3800).
-        if (shouldRecycleConversation(session.conversationHistory, this.conversationMaxChars())) {
-          await recycleObserverConversation(
-            session,
-            this.sessionManager,
-            worker,
-            'budget',
-            `conversation reached ${conversationChars(session.conversationHistory)} chars`,
-          );
-          return;
+        if (message.type === 'observation') {
+          const maxChars = this.conversationMaxChars();
+          // Retire a full generation BEFORE yielding. The SDK holds the real
+          // conversation server-side, but conversationHistory tracks every prompt
+          // fed into it, so its size is the proxy for how close that conversation
+          // is to the ceiling (#3800).
+          if (shouldRecycleConversation(session.conversationHistory, maxChars)) {
+            await recycleObserverConversation(
+              session,
+              this.sessionManager,
+              worker,
+              'budget',
+              `conversation reached ${conversationChars(session.conversationHistory)} chars`,
+            );
+            return;
+          }
+
+          const ceiling = observerBatchCeiling(maxChars);
+          const prompts: string[] = [];
+          let batchChars = 0;
+          for (;;) {
+            if (message.prompt_number !== undefined) {
+              session.lastPromptNumber = message.prompt_number;
+            }
+
+            // An oversized payload is condensed by a bounded model pass before the
+            // prompt is built, so the observation carries a summary of the whole
+            // field rather than a head/tail slice with the middle cut out (#3800).
+            const optimized = compressField
+              ? await optimizeObservationFields(
+                  { toolInput: message.tool_input, toolOutput: message.tool_response },
+                  compressField,
+                  { sessionDbId: session.sessionDbId, toolName: message.tool_name },
+                )
+              : { toolInput: message.tool_input, toolOutput: message.tool_response };
+
+            const obsPrompt = buildObservationPrompt({
+              id: 0, // Not used in prompt
+              tool_name: message.tool_name!,
+              tool_input: JSON.stringify(optimized.toolInput),
+              tool_output: JSON.stringify(optimized.toolOutput),
+              created_at_epoch: Date.now(),
+              cwd: message.cwd
+            });
+            prompts.push(obsPrompt);
+            batchChars += obsPrompt.length;
+
+            // Only a message already buffered joins, so this pull never waits.
+            const upcoming = buffer.peekNextUnclaimed(session.sessionDbId);
+            if (!upcoming || batchChars >= ceiling || !joinsBatch(message, upcoming)) break;
+            const following = await messages.next();
+            if (following.done) break;
+            message = following.value;
+            if (message.cwd) {
+              cwdTracker.lastCwd = message.cwd;
+            }
+          }
+          const batchPrompt = prompts.join('\n\n');
+          activeResponseContext.current = snapshotResponseContext(session);
+
+          session.conversationHistory.push({ role: 'user', content: batchPrompt });
+
+          session.lastPromptSentAt = Date.now();
+          session.lastGeneratorSource = 'ingest';
+          answeredBeforeSend = pacer.mark();
+          yield {
+            type: 'user',
+            message: {
+              role: 'user',
+              content: batchPrompt
+            },
+            session_id: session.contentSessionId,
+            parent_tool_use_id: null,
+            isSynthetic: true
+          };
+          if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
+        } else if (message.type === 'summarize') {
+          const summaryPrompt = buildSummaryPrompt({
+            id: session.sessionDbId,
+            memory_session_id: session.memorySessionId,
+            project: session.project,
+            user_prompt: session.userPrompt,
+            last_assistant_message: message.last_assistant_message || ''
+          }, mode);
+          activeResponseContext.current = snapshotResponseContext(session);
+
+          session.conversationHistory.push({ role: 'user', content: summaryPrompt });
+
+          session.lastPromptSentAt = Date.now();
+          session.lastGeneratorSource = 'summarize';
+          answeredBeforeSend = pacer.mark();
+          yield {
+            type: 'user',
+            message: {
+              role: 'user',
+              content: summaryPrompt
+            },
+            session_id: session.contentSessionId,
+            parent_tool_use_id: null,
+            isSynthetic: true
+          };
+          if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
         }
-
-        // An oversized payload is condensed by a bounded model pass before the
-        // prompt is built, so the observation carries a summary of the whole
-        // field rather than a head/tail slice with the middle cut out (#3800).
-        const optimized = compressField
-          ? await optimizeObservationFields(
-              { toolInput: message.tool_input, toolOutput: message.tool_response },
-              compressField,
-              { sessionDbId: session.sessionDbId, toolName: message.tool_name },
-            )
-          : { toolInput: message.tool_input, toolOutput: message.tool_response };
-
-        const obsPrompt = buildObservationPrompt({
-          id: 0, // Not used in prompt
-          tool_name: message.tool_name!,
-          tool_input: JSON.stringify(optimized.toolInput),
-          tool_output: JSON.stringify(optimized.toolOutput),
-          created_at_epoch: Date.now(),
-          cwd: message.cwd
-        });
-        activeResponseContext.current = snapshotResponseContext(session);
-
-        session.conversationHistory.push({ role: 'user', content: obsPrompt });
-
-        session.lastPromptSentAt = Date.now();
-        session.lastGeneratorSource = 'ingest';
-        answeredBeforeSend = pacer.mark();
-        yield {
-          type: 'user',
-          message: {
-            role: 'user',
-            content: obsPrompt
-          },
-          session_id: session.contentSessionId,
-          parent_tool_use_id: null,
-          isSynthetic: true
-        };
-        if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
-      } else if (message.type === 'summarize') {
-        const summaryPrompt = buildSummaryPrompt({
-          id: session.sessionDbId,
-          memory_session_id: session.memorySessionId,
-          project: session.project,
-          user_prompt: session.userPrompt,
-          last_assistant_message: message.last_assistant_message || ''
-        }, mode);
-        activeResponseContext.current = snapshotResponseContext(session);
-
-        session.conversationHistory.push({ role: 'user', content: summaryPrompt });
-
-        session.lastPromptSentAt = Date.now();
-        session.lastGeneratorSource = 'summarize';
-        answeredBeforeSend = pacer.mark();
-        yield {
-          type: 'user',
-          message: {
-            role: 'user',
-            content: summaryPrompt
-          },
-          session_id: session.contentSessionId,
-          parent_tool_use_id: null,
-          isSynthetic: true
-        };
-        if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
       }
+    } finally {
+      await messages.return?.(undefined);
     }
   }
 
