@@ -172,6 +172,7 @@
               "claude-code",
               "session-end"
             ],
+            "timeout": 10,
             "async": true
           }
         ]

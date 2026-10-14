@@ -9,6 +9,7 @@ import {
   type HookSpoolKind,
   type HookSpoolPayloadByKind,
 } from '../shared/hook-spool.js';
+import { normalizePlatformSource } from '../shared/platform-source.js';
 import { workerHttpRequest, getWorkerHost } from '../shared/worker-utils.js';
 import { resolveWorkerScriptPath } from '../shared/worker-utils.js';
 import { spawn } from 'child_process';
@@ -23,12 +24,11 @@ import { logger } from '../utils/logger.js';
 export const SPOOL_NUDGE_TIMEOUT_MS = 250;
 
 /**
- * How long a write hook forwards the spool before it exits. A tool call's hook
- * keeps the nudge's budget, since it runs on every tool call. The Stop hook
- * takes longer, so a backlog the tool calls could not move (a slow link, a
- * worker that was down) reaches the worker by the end of the turn at the
- * latest. SessionEnd stops within the 1.5 s Claude Code gives it, so the hook
- * releases its lock itself rather than being killed while it holds it.
+ * How long a write hook forwards the spool before it exits, on a host whose
+ * hooks may sit in a tool call's path. A tool call's hook keeps the nudge's
+ * budget there. The Stop hook takes longer, so a backlog the tool calls could
+ * not move (a slow link, a worker that was down) reaches the worker by the end
+ * of the turn at the latest.
  */
 export const SPOOL_FORWARD_BUDGET_MS: Record<HookSpoolKind, number> = {
   observation: SPOOL_NUDGE_TIMEOUT_MS,
@@ -40,6 +40,21 @@ export const SPOOL_FORWARD_BUDGET_MS: Record<HookSpoolKind, number> = {
   deliverables: 5_000,
   work_state_telemetry: SPOOL_NUDGE_TIMEOUT_MS,
 };
+
+/**
+ * Claude Code runs PostToolUse, PostToolUseFailure, Stop and SessionEnd as
+ * async hooks (plugin/hooks/hooks.json), so no tool call waits on a forward.
+ * Through a tailnet relay into a cloud container a forward takes longer than
+ * 250 ms, and every tool call's entry used to wait for the Stop hook. Each of
+ * its write hooks gets the Stop hook's budget. SessionEnd fits inside it
+ * because its hook's own timeout, which is what Claude Code waits at exit, is
+ * set above it (SESSION_END_HOOK_TIMEOUT_SECONDS in scripts/build-hooks.js).
+ */
+export const CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS = 5_000;
+
+export function spoolForwardBudgetMs(kind: HookSpoolKind, platformSource: string | undefined): number {
+  return normalizePlatformSource(platformSource) === 'claude' ? CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS : SPOOL_FORWARD_BUDGET_MS[kind];
+}
 
 const FORWARD_BATCH_LIMITS = { maxEntries: 100, maxBytes: 256 * 1024 };
 const FORWARD_LOCK_DIRNAME = '.forward-lock';
@@ -356,7 +371,7 @@ export function forwardHookSpoolToWorker(budgetMs: number): Promise<void> {
 
 /**
  * Resolves once every nudge and forward this process started has finished,
- * each within its budget (SPOOL_FORWARD_BUDGET_MS of the event it followed).
+ * each within its budget (spoolForwardBudgetMs of the event it followed).
  */
 export async function settleHookSpoolNudges(): Promise<void> {
   if (!pendingNudge && !remoteUploadRequested && selectRuntime() === 'worker') {
@@ -380,7 +395,7 @@ export function spoolHookEvent<K extends HookSpoolKind>(kind: K, payload: HookSp
   if (usesIngestTransport(loadFromFileOnce())) {
     void nudgeWorkerToDrainHookSpool();
   } else {
-    void forwardHookSpoolToWorker(SPOOL_FORWARD_BUDGET_MS[kind]);
+    void forwardHookSpoolToWorker(spoolForwardBudgetMs(kind, payload.platformSource));
   }
   return entryPath;
 }
