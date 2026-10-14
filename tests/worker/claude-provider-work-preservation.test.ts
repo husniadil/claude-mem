@@ -247,6 +247,9 @@ function createHarness(backlog: number) {
   const session = createSession();
   (sessionManager as any).sessions.set(SESSION_ID, session);
 
+  // Each queued observation gets its own prompt number, so none joins another's
+  // batch (the fork batches buffered observations of one prompt number) and
+  // every observation is its own prompt.
   const buffer = sessionManager.getMessageBuffer();
   for (let i = 0; i < backlog; i++) {
     buffer.enqueue(SESSION_ID, {
@@ -254,7 +257,7 @@ function createHarness(backlog: number) {
       tool_name: 'Bash',
       tool_input: { command: `step ${i}` },
       tool_response: `${i}:`.padEnd(200, 'x'),
-      prompt_number: 2,
+      prompt_number: 2 + i,
       toolUseId: `toolu_${i}`,
     });
   }

@@ -120,6 +120,9 @@ describe('a bare user prompt does not cost an observer call', () => {
       getClaimedMessages: mock(() => []),
       confirmClaimedMessages: mock(() => Promise.resolve(0)),
       resetProcessingToPending: mock(() => Promise.resolve(0)),
+      // The fork's batching extends a prompt with buffered observations; this
+      // feed has none beyond what the iterator yields.
+      claimNextObservation: () => null,
     } as unknown as SessionManager;
   }
 
