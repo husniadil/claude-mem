@@ -10,6 +10,11 @@
 // search() without dateStart only looks back CLAUDE_MEM_SEARCH_RECENCY_DAYS
 // (0: no limit). The MCP server fills dateStart in itself, so the window it
 // describes to the model is the one it uses.
+//
+// Both hold the worker runtime only. With CLAUDE_MEM_RUNTIME=server, search()
+// goes to the server's /v1/search, which takes no project or dates, and any
+// such filter sends it to the local worker instead. So there is no window, and
+// a project scope is refused rather than read from the wrong database.
 
 import { getProjectContext } from '../utils/project-name.js';
 import { logger } from '../utils/logger.js';
@@ -20,6 +25,8 @@ export interface MemoryPolicy {
   scope: SearchScope;
   project: string;
   recencyDays: number;
+  /** Whether search() gets the recency window: the worker runtime only. */
+  windowed: boolean;
 }
 
 // The tools a project-scoped session keeps. Each memory tool here passes the
@@ -45,6 +52,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export function memoryPolicy(
   settings: { CLAUDE_MEM_SEARCH_SCOPE: string; CLAUDE_MEM_SEARCH_RECENCY_DAYS: string },
   cwd: string,
+  runtime: 'worker' | 'server' = 'worker',
 ): MemoryPolicy {
   const scope = settings.CLAUDE_MEM_SEARCH_SCOPE.trim().toLowerCase();
   if (scope !== 'all' && scope !== 'project') {
@@ -54,8 +62,16 @@ export function memoryPolicy(
   if (!Number.isInteger(days) || days < 0) {
     throw new Error(`CLAUDE_MEM_SEARCH_RECENCY_DAYS must be a whole number of days, 0 for no limit, not "${settings.CLAUDE_MEM_SEARCH_RECENCY_DAYS}"`);
   }
-  const policy: MemoryPolicy = { scope, project: getProjectContext(cwd).primary, recencyDays: days };
-  logger.info('SYSTEM', 'MCP memory policy', { scope: policy.scope, project: policy.project, recencyDays: policy.recencyDays });
+  if (scope === 'project' && runtime === 'server') {
+    throw new Error('CLAUDE_MEM_SEARCH_SCOPE=project holds the worker runtime\'s memory tools; CLAUDE_MEM_RUNTIME=server has no project hold');
+  }
+  const policy: MemoryPolicy = {
+    scope,
+    project: getProjectContext(cwd).primary,
+    recencyDays: days,
+    windowed: runtime === 'worker',
+  };
+  logger.info('SYSTEM', 'MCP memory policy', { scope: policy.scope, project: policy.project, recencyDays: policy.recencyDays, windowed: policy.windowed });
   return policy;
 }
 
@@ -81,7 +97,7 @@ export function describeTool<T extends { name: string; description: string; inpu
 ): T {
   let description = tool.description;
   let inputSchema = tool.inputSchema;
-  if (tool.name === 'search') {
+  if (tool.name === 'search' && policy.windowed) {
     description = `${description}. ${windowText(policy)}`;
   }
   if (policy.scope === 'project' && MEMORY_TOOLS.has(tool.name)) {
@@ -105,7 +121,7 @@ export function scopeArgs(
     delete out.projects;
     out.project = policy.project;
   }
-  if (toolName === 'search' && out.dateStart === undefined && out.date_start === undefined && out.date_from === undefined) {
+  if (policy.windowed && toolName === 'search' && out.dateStart === undefined && out.date_start === undefined && out.date_from === undefined) {
     // An epoch of 0 is read by the worker as no lower bound.
     out.dateStart = new Date(policy.recencyDays === 0 ? 0 : now - policy.recencyDays * DAY_MS).toISOString();
   }
