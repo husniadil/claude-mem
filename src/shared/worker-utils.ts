@@ -1406,7 +1406,7 @@ export async function ensureWorkerRunning(timeoutMs?: number): Promise<boolean> 
 
   if (autostartDisabled) {
     // No worker is up and hooks may not start one; the caller's fallback
-    // reports worker_autostart_disabled without counting a failure.
+    // reports worker_autostart_disabled and counts the failure.
     logger.debug('SYSTEM', 'Worker not running and CLAUDE_MEM_WORKER_AUTOSTART=false — not lazy-spawning');
     return false;
   }
@@ -1919,7 +1919,9 @@ export function getActiveHookType(): TelemetryHookType | null {
  * port, the port fix replaces the generic recovery hint.
  */
 function buildWorkerOutageNotice(consecutiveFailures: number): string {
-  const recovery = unbindablePortDiagnosis !== null
+  const recovery = isWorkerAutostartDisabled(loadFromFileOnce())
+    ? `The worker at ${buildWorkerUrl('')} is managed outside this machine (CLAUDE_MEM_WORKER_AUTOSTART=false), so nothing here starts it: check it there.`
+    : unbindablePortDiagnosis !== null
     ? `The worker cannot bind port ${unbindablePortDiagnosis} on ${getWorkerHost()}: the system refuses it (EACCES or EADDRNOTAVAIL). ${UNBINDABLE_PORT_REMEDIATION}.`
     : orphanedPortDiagnosis !== null
       ? `Port ${orphanedPortDiagnosis} is held by an unreachable process that no PID file claims, so the worker cannot bind it. ${ORPHANED_PORT_REMEDIATION}.`
@@ -2130,14 +2132,15 @@ export async function executeWithWorkerFallback<T = unknown>(
     ? await ensureWorkerReadyWithin(options.workerStartupTimeoutMs!)
     : await ensureWorkerAliveOnce(options.timeoutMs);
   if (!alive) {
-    // An externally managed worker (CLAUDE_MEM_WORKER_AUTOSTART=false) being
-    // down is the operator's call, not a claude-mem failure: skip quietly and
-    // never feed the fail-loud counter.
-    if (isWorkerAutostartDisabled(loadFromFileOnce())) {
-      return { continue: true, reason: 'worker_autostart_disabled', [WORKER_FALLBACK_BRAND]: true };
-    }
+    // An externally managed worker (CLAUDE_MEM_WORKER_AUTOSTART=false) that does
+    // not answer is counted too (husni fork; upstream skips quietly). With the
+    // worker on another machine, the fail-loud notice is the only sign that
+    // memory stopped: nothing is captured locally meanwhile.
     if (!boundedStartup) {
       await recordWorkerUnreachable();
+    }
+    if (isWorkerAutostartDisabled(loadFromFileOnce())) {
+      return { continue: true, reason: 'worker_autostart_disabled', [WORKER_FALLBACK_BRAND]: true };
     }
     return { continue: true, reason: 'worker_unreachable', [WORKER_FALLBACK_BRAND]: true };
   }
