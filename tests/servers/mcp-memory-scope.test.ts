@@ -61,6 +61,15 @@ describe('MCP memory scope', () => {
     expect(scopeArgs(policy('all', '30'), 'timeline', { anchor: 1 }, NOW).dateStart).toBeUndefined();
   });
 
+  it('leaves the server runtime without a window, and refuses a project scope there', () => {
+    const server = memoryPolicy({ CLAUDE_MEM_SEARCH_SCOPE: 'all', CLAUDE_MEM_SEARCH_RECENCY_DAYS: '90' }, dir, 'server');
+    // A dateStart would send search() past /v1/search to the local worker.
+    expect(scopeArgs(server, 'search', { query: 'x' }, NOW)).toEqual({ query: 'x' });
+    expect(describeTool(server, search).description).toBe(search.description);
+    expect(() => memoryPolicy({ CLAUDE_MEM_SEARCH_SCOPE: 'project', CLAUDE_MEM_SEARCH_RECENCY_DAYS: '90' }, dir, 'server'))
+      .toThrow('CLAUDE_MEM_SEARCH_SCOPE=project');
+  });
+
   it('tells the model the window and the scope it gets', () => {
     expect(describeTool(policy('all', '30'), search).description).toContain('only the last 30 days; pass dateStart');
     expect(describeTool(policy('all', '0'), search).description).toContain('searches all of memory');
@@ -75,5 +84,6 @@ describe('MCP memory scope', () => {
     expect(src).toContain('.filter(tool => isOffered(memory, tool.name))');
     expect(src).toContain('!isOffered(memory, tool.name)');
     expect(src).toContain('tool.handler(scopeArgs(memory, tool.name,');
+    expect(src).toContain('memoryPolicy(loadFromFileOnce(), process.cwd(), selectRuntime())');
   });
 });
