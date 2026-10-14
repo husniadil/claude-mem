@@ -71,12 +71,12 @@ afterAll(() => {
 });
 
 describe('SubagentStop hook', () => {
-  it('spools the subagent identity and nudges the worker, keeping no transcript text', async () => {
+  it('spools the subagent identity and forwards it to the worker, keeping no transcript text', async () => {
     const input = claudeCodeAdapter.normalizeInput(SUBAGENT_STOP_INPUT);
     input.platform = 'claude-code';
     const result = await getEventHandler('subagent-stop').execute(input);
     expect(result).toMatchObject({ continue: true, suppressOutput: true });
-    expect(nudgeLog).toEqual(['/api/spool/nudge']);
+    expect(nudgeLog).toEqual(['/api/spool/entries']);
     expect(spooledEntries()).toEqual([{
       kind: 'subagent_stop',
       payload: { contentSessionId: 'parent-session', platformSource: 'claude', agentId: 'a1e7d1aa9fa57892a', agentType: 'general-purpose', cwd: '/tmp/subagent-stop-project' },

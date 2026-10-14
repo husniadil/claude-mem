@@ -79,8 +79,9 @@ async function executeHookPipeline(
     spoolWorkStateInstruction(input, workStateModelText(output), workStateTelemetry === 'measure' ? undefined : workStateTelemetry);
   }
   const exitCode = result.exitCode ?? HOOK_EXIT_CODES.SUCCESS;
-  // A write hook spooled its event and started a nudge to the worker; let it
-  // land (≤ 250 ms) so the drain starts now — process.exit would kill it.
+  // A write hook spooled its event and started forwarding it to the worker; let
+  // it finish within its budget (250 ms on a tool call, 5 s at the end of a turn
+  // or session) — process.exit would kill it.
   await settleHookSpoolNudges();
   await exitGraceful(options);
   return exitCode;

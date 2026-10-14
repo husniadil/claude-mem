@@ -90,7 +90,7 @@ describe('fileEditHandler internal observer sessions', () => {
     expect(nudgeLog).toEqual([]);
   });
 
-  it('spools a tracked file edit and nudges the worker without awaiting it', async () => {
+  it('spools a tracked file edit and forwards it to the worker without awaiting it', async () => {
     const { fileEditHandler } = await import('../../../src/cli/handlers/file-edit.js');
 
     const result = await fileEditHandler.execute({
@@ -103,7 +103,7 @@ describe('fileEditHandler internal observer sessions', () => {
 
     expect(result.continue).toBe(true);
     expect(workerCallLog).toEqual([]);
-    expect(nudgeLog).toEqual(['/api/spool/nudge']);
+    expect(nudgeLog).toEqual(['/api/spool/entries']);
     expect(spooledEntries()).toEqual([{
       kind: 'file_edit',
       payload: {

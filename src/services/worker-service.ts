@@ -11,7 +11,7 @@ import { getCurrentWorkerPid, verifyRestartedWorker } from './restart-verify.js'
 import { runShutdownSequence, WORKER_GRACEFUL_SHUTDOWN_DEADLINE_BASE_MS, type WorkerShutdownReason } from './worker-shutdown.js';
 import { DATA_DIR, DB_PATH, USER_SETTINGS_PATH, ensureDir, paths } from '../shared/paths.js';
 import { HookSpool, migrateLegacySessionEndReplay } from '../shared/hook-spool.js';
-import { HookSpoolDrainer, hookSpoolConsumedMarkers } from './worker/hook-spool-drain.js';
+import { HookSpoolDrainer, hookSpoolConsumedMarkers, hookSpoolEntriesHandlers } from './worker/hook-spool-drain.js';
 import { HookSpoolRoutes } from './worker/http/routes/HookSpoolRoutes.js';
 import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { getUptimeSeconds } from '../shared/uptime.js';
@@ -582,6 +582,15 @@ export class WorkerService implements WorkerRef {
       () => SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH).CLAUDE_MEM_WORKER_INGEST_TOKEN,
       SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH).CLAUDE_MEM_WORKER_INGEST_MAX_BYTES,
     ));
+
+    // A hook whose spool this worker cannot read (another machine, or a port
+    // forwarded into a container) sends its entries here. Behind the init gate
+    // like the nudge: a 503 leaves them with the hook. One entry is at most what
+    // a tool use holds, and the hook caps a batch well below this limit.
+    this.server.app.post(
+      '/api/spool/entries',
+      ...hookSpoolEntriesHandlers(this.hookSpool, () => void this.hookSpoolDrainer.requestDrain()),
+    );
 
     this.workViewRoutes = new WorkViewRoutes({
       getLocalDeviceId: () => this.dbManager.getCloudSync()?.status().deviceId ?? '',
