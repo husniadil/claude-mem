@@ -1,5 +1,15 @@
 import { mkdirSync, watch as fsWatch } from 'fs';
-import { HOOK_SPOOL_SESSION_END_UNKNOWN_GRACE_MS, HookSpool, type HookSpoolConsumedMarkers, type HookSpoolDrainResult, type HookSpoolEntry } from '../../shared/hook-spool.js';
+import express, { type Request, type RequestHandler, type Response } from 'express';
+import {
+  HOOK_SPOOL_FORWARD_CONTENT_TYPE,
+  HOOK_SPOOL_SESSION_END_UNKNOWN_GRACE_MS,
+  HookSpool,
+  type HookSpoolConsumedMarkers,
+  type HookSpoolDrainResult,
+  type HookSpoolEntry,
+  type HookSpoolForwardReply,
+  validateHookSpoolEntry,
+} from '../../shared/hook-spool.js';
 import type { SessionStore } from '../sqlite/SessionStore.js';
 import { logger } from '../../utils/logger.js';
 import { ingestAdvisorCalls, ingestObservation, ingestSessionEnd, ingestSummarize, requireIngestContext } from './http/shared.js';
@@ -62,6 +72,71 @@ export function hookSpoolConsumedMarkers(store: SessionStore): HookSpoolConsumed
     clearConsumed: entryKey => store.clearHookSpoolEntryConsumed(entryKey),
     pruneConsumedBefore: epochMs => store.pruneHookSpoolConsumedMarkersBefore(epochMs),
   };
+}
+
+/**
+ * A hook's forwarded entries (POST /api/spool/entries), written into this
+ * worker's spool under their own keys and timestamps, so the drain takes them
+ * like entries a hook here wrote. The reply names the entries now durable
+ * here, and the hook removes only those. A hook that spools into this very
+ * directory is told so, and nothing is written.
+ */
+export function acceptForwardedHookSpoolEntries(
+  spool: HookSpool,
+  body: unknown,
+): { ok: true; reply: HookSpoolForwardReply } | { ok: false; error: string } {
+  const request = body as { spoolId?: unknown; entries?: unknown } | null;
+  if (request === null || typeof request !== 'object' || typeof request.spoolId !== 'string' || !Array.isArray(request.entries)) {
+    return { ok: false, error: 'Body must be {spoolId: string, entries: array}' };
+  }
+  if (request.spoolId === spool.spoolId()) {
+    return { ok: true, reply: { sameSpool: true, accepted: [] } };
+  }
+
+  const accepted: number[] = [];
+  request.entries.forEach((raw, index) => {
+    const entry = validateHookSpoolEntry(raw);
+    if ('corruptReason' in entry) {
+      logger.warn('HOOK', 'Refused a forwarded hook spool entry; the hook keeps it', { index, reason: entry.corruptReason });
+      return;
+    }
+    try {
+      spool.enqueueEntry(entry);
+      accepted.push(index);
+    } catch (error) {
+      logger.error('HOOK', 'Could not write a forwarded hook spool entry; the hook keeps it', {
+        kind: entry.kind,
+        contentSessionId: entry.payload.contentSessionId,
+      }, error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+  return { ok: true, reply: { sameSpool: false, accepted } };
+}
+
+/**
+ * POST /api/spool/entries: the body parser and the handler. The route's own
+ * content type keeps the app-wide 5 MB JSON parser off it.
+ */
+export function hookSpoolEntriesHandlers(spool: HookSpool, requestDrain: () => void): RequestHandler[] {
+  return [
+    express.raw({ type: HOOK_SPOOL_FORWARD_CONTENT_TYPE, limit: '64mb' }),
+    (req: Request, res: Response) => {
+      let body: unknown;
+      try {
+        body = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf-8') : '');
+      } catch {
+        res.status(400).json({ error: `Body must be JSON sent as ${HOOK_SPOOL_FORWARD_CONTENT_TYPE}` });
+        return;
+      }
+      const result = acceptForwardedHookSpoolEntries(spool, body);
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      requestDrain();
+      res.status(200).json(result.reply);
+    },
+  ];
 }
 
 export async function drainHookSpool(spool: HookSpool = new HookSpool()): Promise<HookSpoolDrainResult> {

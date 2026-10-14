@@ -11,7 +11,7 @@ import { getCurrentWorkerPid, verifyRestartedWorker } from './restart-verify.js'
 import { runShutdownSequence, type WorkerShutdownReason } from './worker-shutdown.js';
 import { DATA_DIR, DB_PATH, USER_SETTINGS_PATH, ensureDir } from '../shared/paths.js';
 import { HookSpool, migrateLegacySessionEndReplay } from '../shared/hook-spool.js';
-import { HookSpoolDrainer } from './worker/hook-spool-drain.js';
+import { HookSpoolDrainer, hookSpoolEntriesHandlers } from './worker/hook-spool-drain.js';
 import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { getUptimeSeconds } from '../shared/uptime.js';
 import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
@@ -544,6 +544,15 @@ export class WorkerService implements WorkerRef {
       void this.hookSpoolDrainer.requestDrain();
       res.status(202).json({ status: 'draining' });
     });
+
+    // A hook whose spool this worker cannot read (another machine, or a port
+    // forwarded into a container) sends its entries here. Behind the init gate
+    // like the nudge: a 503 leaves them with the hook. One entry is at most what
+    // a tool use holds, and the hook caps a batch well below this limit.
+    this.server.app.post(
+      '/api/spool/entries',
+      ...hookSpoolEntriesHandlers(this.hookSpool, () => void this.hookSpoolDrainer.requestDrain()),
+    );
 
     this.server.registerRoutes(new ViewerRoutes(this.sseBroadcaster, this.dbManager, this.sessionManager));
     const sessionRoutes = new SessionRoutes(this.sessionManager, this.dbManager, this.sdkAgent, this.geminiAgent, this.openRouterAgent, this.sessionEventBroadcaster, this, this.completionHandler, this.codexAgent, this.openAICompatAgent);

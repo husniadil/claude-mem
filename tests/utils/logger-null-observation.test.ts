@@ -76,7 +76,7 @@ describe('JSON null observation capture', () => {
       expect(receipt.runtime).toBe(Bun.version);
       expect(receipt.results.map((r: { spooled: number }) => r.spooled)).toEqual([1, 1, 1, 1]);
       expect(receipt.results.every((r: { output: { continue: boolean } }) => r.output.continue)).toBe(true);
-      expect(receipt.requests).toEqual(Array(4).fill('/api/spool/nudge'));
+      expect(receipt.requests).toEqual(Array(4).fill('/api/spool/entries'));
       expect(receipt.entries).toHaveLength(4);
       const captured = receipt.entries.find((entry: { payload: { contentSessionId: string } }) =>
         entry.payload.contentSessionId === 'json-null');

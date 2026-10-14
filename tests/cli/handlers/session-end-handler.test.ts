@@ -65,7 +65,7 @@ afterAll(() => {
 });
 
 describe('sessionEndHandler', () => {
-  it('spools the normalized SessionEnd and nudges the worker without awaiting it', async () => {
+  it('spools the normalized SessionEnd and forwards it to the worker without awaiting it', async () => {
     const { sessionEndHandler } = await import('../../../src/cli/handlers/session-end.js');
     const input = claudeCodeAdapter.normalizeInput({
       session_id: 'session-end-123',
@@ -79,7 +79,7 @@ describe('sessionEndHandler', () => {
     expect(result.continue).toBe(true);
     expect(result.suppressOutput).toBe(true);
     expect(workerCallLog).toHaveLength(0);
-    expect(nudgeLog).toEqual(['/api/spool/nudge']);
+    expect(nudgeLog).toEqual(['/api/spool/entries']);
     expect(spooledEntries()).toEqual([{
       kind: 'session_end',
       payload: { contentSessionId: 'session-end-123', platformSource: 'claude' },

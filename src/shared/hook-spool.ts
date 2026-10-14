@@ -1,5 +1,5 @@
-import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync } from 'fs';
+import { createHash, randomUUID } from 'crypto';
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { writeJsonFileAtomic } from './atomic-json.js';
 import { resolveDataDir } from './paths.js';
@@ -110,7 +110,28 @@ export interface HookSpoolDrainResult {
   expired: number;
 }
 
+/**
+ * Content type of POST /api/spool/entries. Its own type keeps the worker's
+ * 5 MB JSON body parser off the route, which parses it with a limit of its own.
+ */
+export const HOOK_SPOOL_FORWARD_CONTENT_TYPE = 'application/vnd.claude-mem.hook-spool+json';
+
+/** The worker's answer to a batch of forwarded entries. */
+export interface HookSpoolForwardReply {
+  /** The worker drains this very directory: it took nothing over, so nothing may be removed. */
+  sameSpool: boolean;
+  /** Indexes into the batch of the entries the worker durably wrote into its own spool. */
+  accepted: number[];
+}
+
+export interface HookSpoolForwardResult {
+  forwarded: number;
+  remaining: number;
+  sameSpool: boolean;
+}
+
 const ENTRY_FILENAME = /^[a-z_]+-[A-Za-z0-9_-]+\.json$/;
+const SPOOL_ID_FILENAME = '.spool-id';
 const FILENAME_SAFE_TOOL_USE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CORRUPT_DIRNAME = 'corrupt';
 const EXPIRED_DIRNAME = 'expired';
@@ -185,6 +206,11 @@ function parseHookSpoolEntry(raw: string): HookSpoolEntry | { corruptReason: str
   } catch (error) {
     return { corruptReason: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
+  return validateHookSpoolEntry(parsed);
+}
+
+/** The entry a parsed spool file, or a forwarded one, holds, or a reason it is corrupt. */
+export function validateHookSpoolEntry(parsed: unknown): HookSpoolEntry | { corruptReason: string } {
   if (parsed === null || typeof parsed !== 'object') return { corruptReason: 'not an object' };
   const candidate = parsed as { kind?: unknown; payload?: unknown; enqueuedAtEpochMs?: unknown };
   if (!HOOK_SPOOL_KINDS.includes(candidate.kind as HookSpoolKind)) {
@@ -274,9 +300,76 @@ export class HookSpool {
     return entryPath;
   }
 
+  /** Writes an entry another spool forwarded, keeping its own timestamp. */
+  enqueueEntry(entry: HookSpoolEntry): string {
+    return this.enqueue(entry.kind, entry.payload as HookSpoolPayloadByKind[typeof entry.kind], entry.enqueuedAtEpochMs);
+  }
+
   /** Readable entries in drain order. Corrupt files are quarantined as a side effect. */
   entries(): HookSpoolEntry[] {
     return this.readEntries().files.map(file => file.entry);
+  }
+
+  /**
+   * This directory's identity, made once and kept in it. A hook forwarding its
+   * entries sends it, so a worker that drains this very directory says so
+   * instead of taking them over: the hook would otherwise remove the files the
+   * worker had just written.
+   */
+  spoolId(): string {
+    const idPath = join(this.directory, SPOOL_ID_FILENAME);
+    if (!existsSync(idPath)) {
+      mkdirSync(this.directory, { recursive: true });
+      // Written whole under a temp name, then linked into place: a reader
+      // never sees a half-written id, and when two processes race the first
+      // link wins and the other reads it.
+      const tempPath = `${idPath}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(tempPath, `${randomUUID()}\n`);
+      try {
+        linkSync(tempPath, idPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      } finally {
+        rmSync(tempPath, { force: true });
+      }
+    }
+    const id = readFileSync(idPath, 'utf-8').trim();
+    if (id === '') throw new Error(`Hook spool id file is empty: ${idPath}`);
+    return id;
+  }
+
+  /**
+   * Hands the oldest entries, up to `maxEntries` and `maxBytes` but always at
+   * least one, to a worker that drains a spool of its own, and removes each
+   * entry the worker answers it wrote there. Nothing is removed without that
+   * answer, so a failed or cut-off send keeps every entry for the next one.
+   * The worse case is an entry sent twice, never one that is lost.
+   */
+  async forward(
+    send: (entries: HookSpoolEntry[], spoolId: string) => Promise<HookSpoolForwardReply>,
+    limits: { maxEntries: number; maxBytes: number },
+  ): Promise<HookSpoolForwardResult> {
+    const { files } = this.readEntries();
+    if (files.length === 0) return { forwarded: 0, remaining: 0, sameSpool: false };
+
+    const batch: HookSpoolFile[] = [];
+    let bytes = 0;
+    for (const file of files) {
+      const size = JSON.stringify(file.entry).length;
+      if (batch.length > 0 && (batch.length >= limits.maxEntries || bytes + size > limits.maxBytes)) break;
+      batch.push(file);
+      bytes += size;
+    }
+
+    const reply = await send(batch.map(file => file.entry), this.spoolId());
+    if (reply.sameSpool) return { forwarded: 0, remaining: files.length, sameSpool: true };
+
+    let forwarded = 0;
+    for (const index of new Set(reply.accepted)) {
+      const file = batch[index];
+      if (file && this.unlinkEntry(file)) forwarded++;
+    }
+    return { forwarded, remaining: files.length - forwarded, sameSpool: false };
   }
 
   /**
