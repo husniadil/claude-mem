@@ -171,7 +171,7 @@ describe('CLAUDE_MEM_WORKER_AUTOSTART opt-out in the hook path', () => {
     expect(spawnCalls).toHaveLength(0);
   });
 
-  it('never lazy-spawns, and a down worker skips quietly without feeding the fail-loud counter', async () => {
+  it('never lazy-spawns, and a down worker still feeds the fail-loud counter (husni fork)', async () => {
     settings = { CLAUDE_MEM_WORKER_AUTOSTART: 'false' };
     workerUp = false;
     const before = hookFailureCount();
@@ -182,7 +182,9 @@ describe('CLAUDE_MEM_WORKER_AUTOSTART opt-out in the hook path', () => {
     expect(workerUtils.isWorkerFallback(result)).toBe(true);
     expect((result as { reason?: string }).reason).toBe('worker_autostart_disabled');
     expect(spawnCalls).toHaveLength(0);
-    expect(hookFailureCount()).toBe(before);
+    // Upstream skips quietly here. The fork counts it: with the worker on
+    // another machine, the outage notice is the only sign memory stopped.
+    expect(hookFailureCount()).toBe(before + 1);
   });
 
   it('never recycles a mismatched worker it did not start; it uses it as is', async () => {
