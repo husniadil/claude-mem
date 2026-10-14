@@ -15,17 +15,18 @@ export const SPOOL_NUDGE_TIMEOUT_MS = 250;
 
 /**
  * How long a write hook forwards the spool before it exits. A tool call's hook
- * keeps the nudge's budget, since it runs on every tool call. The hooks that
- * close a turn or a session take longer, so a backlog the tool calls could not
- * move (a slow link, a worker that was down) reaches the worker by the end of
- * the turn at the latest.
+ * keeps the nudge's budget, since it runs on every tool call. The Stop hook
+ * takes longer, so a backlog the tool calls could not move (a slow link, a
+ * worker that was down) reaches the worker by the end of the turn at the
+ * latest. SessionEnd stops within the 1.5 s Claude Code gives it, so the hook
+ * releases its lock itself rather than being killed while it holds it.
  */
 export const SPOOL_FORWARD_BUDGET_MS: Record<HookSpoolKind, number> = {
   observation: SPOOL_NUDGE_TIMEOUT_MS,
   file_edit: SPOOL_NUDGE_TIMEOUT_MS,
   summarize: 5_000,
   advisor_calls: 5_000,
-  session_end: 5_000,
+  session_end: 1_000,
 };
 
 const FORWARD_BATCH_LIMITS = { maxEntries: 100, maxBytes: 256 * 1024 };
