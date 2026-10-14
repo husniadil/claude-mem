@@ -4,11 +4,21 @@ import { createServer, type Server, type Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
-import { SPOOL_NUDGE_TIMEOUT_MS } from '../../../src/cli/spool-hook-event.js';
+import {
+  CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS,
+  SPOOL_NUDGE_TIMEOUT_MS,
+  spoolForwardBudgetMs,
+} from '../../../src/cli/spool-hook-event.js';
 
 // Phase 5 hook wall-time contract: PostToolUse spools and exits. With the
 // worker down (refused) or wedged (accepts, never answers), the handler must
 // still return well inside a tool-call's latency budget.
+//
+// The forward that hookCommand settles before exit has two budgets. Claude
+// Code runs its write hooks async, so they get CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS
+// and a slow link (a tailnet relay into a cloud container) still delivers each
+// tool call. A host whose hook may sit in the tool call's path keeps the
+// nudge's 250 ms, which the settle test holds with the cursor platform.
 //
 // Each measurement runs in its own `bun` process, like a real hook. In a full
 // `bun test tests` run, other files' module mocks, `?fresh` worker-utils
@@ -17,8 +27,9 @@ import { SPOOL_NUDGE_TIMEOUT_MS } from '../../../src/cli/spool-hook-event.js';
 // went to the default port 37777 (a live worker on a dev machine) instead of
 // the black hole below. A child process has none of that state.
 const HOOK_WALL_TIME_BUDGET_MS = 200;
-// Whole hook up to process.exit: handler + hookCommand settling the nudge
-// (capped at SPOOL_NUDGE_TIMEOUT_MS). Must stay well under 500 ms.
+// Whole hook up to process.exit on a host whose hook may block a tool call:
+// handler + hookCommand settling the forward (capped at SPOOL_NUDGE_TIMEOUT_MS).
+// Must stay well under 500 ms.
 const HOOK_EXIT_WORST_CASE_BUDGET_MS = 400;
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..');
@@ -57,7 +68,7 @@ interface HookTiming {
 }
 
 /** Run the observation hook once in a fresh process pointed at `workerPort`. */
-async function timeObservationHookInChild(workerPort: number): Promise<HookTiming> {
+async function timeObservationHookInChild(workerPort: number, platform = 'claude-code'): Promise<HookTiming> {
   const dataDir = mkdtempSync(join(tmpdir(), 'claude-mem-hook-spool-timing-'));
   tempDataDirs.push(dataDir);
   const source = `
@@ -68,7 +79,7 @@ async function timeObservationHookInChild(workerPort: number): Promise<HookTimin
     const result = await observationHandler.execute({
       sessionId: 'timing-session',
       cwd: '/tmp/timing-project',
-      platform: 'claude-code',
+      platform: ${JSON.stringify(platform)},
       toolName: 'Bash',
       toolInput: { command: 'ls' },
       toolResponse: { stdout: '' },
@@ -122,20 +133,47 @@ describe('observation hook wall time with the worker unavailable', () => {
     expect(timing.spooledToolUseIds).toEqual(['toolu_timing_1']);
   });
 
-  it(`returns in < ${HOOK_WALL_TIME_BUDGET_MS}ms when the worker accepts but never answers (wedged)`, async () => {
+  it(`returns in < ${HOOK_WALL_TIME_BUDGET_MS}ms when the worker accepts but never answers (wedged), and Claude Code's async hook then forwards for its whole budget`, async () => {
     const timing = await timeObservationHookInChild(await blackHolePort());
 
     expect(timing.handlerMs).toBeLessThan(HOOK_WALL_TIME_BUDGET_MS);
     expect(timing.spooledToolUseIds).toEqual(['toolu_timing_1']);
-  });
+    // The forward waited out the wedged worker for the Claude Code budget, and
+    // no longer: the hook still exits.
+    expect(timing.throughNudgeSettleMs).toBeGreaterThanOrEqual(CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS - 50);
+    expect(timing.throughNudgeSettleMs).toBeLessThan(CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS + 1_000);
+  }, CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS + 10_000);
 
-  it(`settles the nudge before exit in < ${HOOK_WALL_TIME_BUDGET_MS}ms when refused and < ${HOOK_EXIT_WORST_CASE_BUDGET_MS}ms when wedged`, async () => {
-    const refused = await timeObservationHookInChild(await closedPort());
+  it(`settles the forward before exit in < ${HOOK_WALL_TIME_BUDGET_MS}ms when refused and < ${HOOK_EXIT_WORST_CASE_BUDGET_MS}ms when wedged, on a host whose hook may block`, async () => {
+    const refused = await timeObservationHookInChild(await closedPort(), 'cursor');
     expect(refused.throughNudgeSettleMs).toBeLessThan(HOOK_WALL_TIME_BUDGET_MS);
 
-    const wedged = await timeObservationHookInChild(await blackHolePort());
-    // Proves the nudge really reached the wedged worker and waited out its timeout.
+    const wedged = await timeObservationHookInChild(await blackHolePort(), 'cursor');
+    // Proves the forward really reached the wedged worker and waited out its budget.
     expect(wedged.throughNudgeSettleMs).toBeGreaterThanOrEqual(SPOOL_NUDGE_TIMEOUT_MS - 50);
     expect(wedged.throughNudgeSettleMs).toBeLessThan(HOOK_EXIT_WORST_CASE_BUDGET_MS);
+  });
+
+  it(`settles the forward in < ${HOOK_WALL_TIME_BUDGET_MS}ms from Claude Code when the worker refuses, whatever its budget`, async () => {
+    const refused = await timeObservationHookInChild(await closedPort(), 'claude-code');
+
+    expect(refused.throughNudgeSettleMs).toBeLessThan(HOOK_WALL_TIME_BUDGET_MS);
+    expect(refused.spooledToolUseIds).toEqual(['toolu_timing_1']);
+  });
+});
+
+describe('spool forward budget per host', () => {
+  it("gives Claude Code's async write hooks the Stop hook's budget, SessionEnd included", () => {
+    for (const kind of ['observation', 'file_edit', 'summarize', 'advisor_calls', 'session_end'] as const) {
+      expect(spoolForwardBudgetMs(kind, 'claude')).toBe(CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS);
+      expect(spoolForwardBudgetMs(kind, 'claude-code')).toBe(CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS);
+    }
+    expect(CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS).toBeGreaterThanOrEqual(5_000);
+  });
+
+  it('keeps the nudge budget on a tool call for a host whose hook may block', () => {
+    expect(spoolForwardBudgetMs('observation', 'cursor')).toBe(SPOOL_NUDGE_TIMEOUT_MS);
+    expect(spoolForwardBudgetMs('file_edit', 'cursor')).toBe(SPOOL_NUDGE_TIMEOUT_MS);
+    expect(spoolForwardBudgetMs('observation', 'codex')).toBe(SPOOL_NUDGE_TIMEOUT_MS);
   });
 });

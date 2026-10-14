@@ -12,6 +12,7 @@ import {
 } from '../../src/build/hook-shell-template.js';
 import { HOOK_TIMEOUTS } from '../../src/shared/hook-constants.js';
 import { FILE_CONTEXT_WORKER_BUDGET_MS } from '../../src/cli/handlers/file-context.js';
+import { spoolForwardBudgetMs } from '../../src/cli/spool-hook-event.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../..');
@@ -679,6 +680,8 @@ const SESSION_INIT_HOOK_TIMEOUT_SECONDS = 15;
 const SESSION_INIT_HOOK_PATH = 'UserPromptSubmit.0.0';
 const FILE_CONTEXT_HOOK_TIMEOUT_SECONDS = 15;
 const FILE_CONTEXT_HOOK_PATH = 'PreToolUse.0.0';
+const SESSION_END_HOOK_TIMEOUT_SECONDS = 10;
+const SESSION_END_HOOK_PATH = 'SessionEnd.0.0';
 
 type RuleAExpectation = string | { command: string; commandWindows?: string; timeout?: number };
 
@@ -705,7 +708,7 @@ const CLAUDE_EXEC_EXPECTATIONS: Record<string, Record<string, unknown>> = {
   // Synchronous so the File Read Gate can deny a whole-file Read.
   'PreToolUse.0.0': claudeExecHook(['hook', 'claude-code', 'file-context'], { timeout: FILE_CONTEXT_HOOK_TIMEOUT_SECONDS }),
   'Stop.0.0': claudeExecHook(['hook', 'claude-code', 'summarize'], { timeout: 120, async: true }),
-  'SessionEnd.0.0': claudeExecHook(['hook', 'claude-code', 'session-end'], { async: true }),
+  'SessionEnd.0.0': claudeExecHook(['hook', 'claude-code', 'session-end'], { timeout: SESSION_END_HOOK_TIMEOUT_SECONDS, async: true }),
 };
 
 const RULE_A_EXPECTATIONS: Record<string, Record<string, RuleAExpectation>> = {
@@ -780,6 +783,16 @@ describe('Spawn-Contract Templating - Rule A generator parity', () => {
     expect(hookEntryByPath(codex, SESSION_INIT_HOOK_PATH)?.timeout).toBeGreaterThan(
       (HOOK_TIMEOUTS.POST_SPAWN_WAIT + 2_000) / 1000,
     );
+  });
+
+  it('gives the Claude Code SessionEnd hook room for its spool forward', () => {
+    const parsed = readJson('plugin/hooks/hooks.json');
+    const timeoutSeconds = hookEntryByPath(parsed, SESSION_END_HOOK_PATH)?.timeout;
+    expect(timeoutSeconds).toBe(SESSION_END_HOOK_TIMEOUT_SECONDS);
+    // Claude Code waits at exit as long as this timeout, at least 1.5 s. The
+    // forward's budget must end inside it with room for hook startup, or the
+    // hook is killed while it holds the spool's forward lock.
+    expect(timeoutSeconds).toBeGreaterThan(spoolForwardBudgetMs('session_end', 'claude') / 1000 + 2);
   });
 
   it('bounds the synchronous Claude Code PreToolUse Read hook below the legacy 60 second stall', () => {

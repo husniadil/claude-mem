@@ -73,8 +73,8 @@ async function executeHookPipeline(
   emitModelContext(adapter, result);
   const exitCode = result.exitCode ?? HOOK_EXIT_CODES.SUCCESS;
   // A write hook spooled its event and started forwarding it to the worker; let
-  // it finish within its budget (250 ms on a tool call, 5 s at the end of a turn,
-  // 1 s at the end of a session) — process.exit would kill it.
+  // it finish within its budget (spoolForwardBudgetMs: 5 s for Claude Code's
+  // async hooks, 250 ms on another host's tool call) — process.exit would kill it.
   await settleHookSpoolNudges();
   await exitGraceful(options);
   return exitCode;

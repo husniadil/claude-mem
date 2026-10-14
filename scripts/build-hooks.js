@@ -137,6 +137,14 @@ const ENSURE_LAUNCHER_HOOK_TIMEOUT_SECONDS = 180;
 // only on `claude --init` / `--maintenance` (SPIKE item 8), never at runtime.
 const SHELL_FORM_HOOK_EVENTS = new Set(['Setup']);
 
+// Claude Code's SessionEnd timeout (seconds). At exit Claude Code waits for
+// SessionEnd hooks as long as the largest SessionEnd hook timeout, at least
+// 1.5 s and at most 60 s (Claude Code 2.1.299), so with none set the hook had
+// 1.5 s. It must stay above the spool forward's 5 s budget for Claude Code
+// (CLAUDE_CODE_SPOOL_FORWARD_BUDGET_MS in src/cli/spool-hook-event.ts) plus
+// hook startup, or a slow forward is killed while it holds the spool's lock.
+const SESSION_END_HOOK_TIMEOUT_SECONDS = 10;
+
 // Claude Code's PreToolUse Read timeout (seconds). The hook is synchronous so
 // the File Read Gate can deny a whole-file Read, which makes every Read wait on
 // it: bounded well under the old 60 s, and above the 3 s worker budget
@@ -204,7 +212,7 @@ export function shellTemplateManifest(buildShellCommand, buildCodexWindowsComman
         // Synchronous so the File Read Gate can deny a whole-file Read.
         'PreToolUse.0.0': claudeExecHook(['hook', 'claude-code', 'file-context'], { timeout: FILE_CONTEXT_HOOK_TIMEOUT_SECONDS }, PRE_TOOL_USE_MATCHER),
         'Stop.0.0': claudeExecHook(['hook', 'claude-code', 'summarize'], { timeout: 120, async: true }),
-        'SessionEnd.0.0': claudeExecHook(['hook', 'claude-code', 'session-end'], { async: true }),
+        'SessionEnd.0.0': claudeExecHook(['hook', 'claude-code', 'session-end'], { timeout: SESSION_END_HOOK_TIMEOUT_SECONDS, async: true }),
       },
     },
     'plugin/hooks/codex-hooks.json': {
