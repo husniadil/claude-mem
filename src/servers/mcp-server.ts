@@ -1089,7 +1089,7 @@ function workStateEnabled(): boolean {
 
 // Read once: the session's project is its working directory, and a bad setting
 // stops the server at start rather than widening what a session can read.
-const memory = memoryPolicy(loadFromFileOnce(), process.cwd());
+const memory = memoryPolicy(loadFromFileOnce(), process.cwd(), selectRuntime());
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const advertisedTools = withoutDisabledWorkStateTools(
