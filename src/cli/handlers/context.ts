@@ -19,7 +19,6 @@ import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { readStaleMarker } from '../../shared/oauth-token.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
-import { proTrialLine } from '../../shared/pro-promo.js';
 import { MEMORY_PLUGIN_INSTRUCTIONS } from '../../shared/memory-instructions.js';
 import {
   cmemGatewayRole,
@@ -283,7 +282,7 @@ export const contextHandler: EventHandler = {
     // local worker, so the link points there.
     const viewerUrl = serverRuntime ? serverRuntime.serverBaseUrl : getViewerBaseUrl(port);
     const systemMessage = showTerminalOutput && displayContent
-      ? `${displayContent}\n\nView Observations Live @ ${viewerUrl}\n${proTrialLine('session-start')}${trialDaysLine ? `\n${trialDaysLine}` : ''}`
+      ? `${displayContent}\n\nView Observations Live @ ${viewerUrl}${trialDaysLine ? `\n${trialDaysLine}` : ''}`
       : undefined;
 
     return {
