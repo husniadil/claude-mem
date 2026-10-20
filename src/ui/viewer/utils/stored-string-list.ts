@@ -3,9 +3,8 @@
  * files_modified) for display on a card.
  *
  * Mirrors `parseStringListField` in `src/services/sync/string-list-field.ts`:
- * the viewer's tsconfig pins rootDir to this directory (see
- * `constants/promo.ts`), so it cannot import the Node-side module. Change both
- * together.
+ * the viewer's tsconfig pins rootDir to this directory, so it cannot import the
+ * Node-side module. Change both together.
  *
  * Same contract as the sync copy:
  * - a JSON array keeps its string entries that are not blank;
