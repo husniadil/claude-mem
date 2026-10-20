@@ -20,7 +20,6 @@ import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { isProjectExcluded } from '../../utils/project-filter.js';
 import { readStaleMarker } from '../../shared/oauth-token.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
-import { proTrialLine } from '../../shared/pro-promo.js';
 import { memoryInstructionsForRuntime } from '../../shared/memory-instructions.js';
 import {
   cmemGatewayRole,
@@ -38,11 +37,8 @@ import { CONTEXT_OUTPUT_LIMIT } from '../../services/context/ContextBudget.js';
 import {
   fetchTeamBrief,
   formatTeamBrief,
-  hasShownTeamBrainDiscoveryNotice,
-  markTeamBrainDiscoveryNoticeShown,
   teamBrainConnection,
   teamBriefReserveChars,
-  TEAMBRAIN_DISCOVERY_LINE,
   type TeamBrainBrief,
   type TeamBrainResult,
 } from '../../shared/teambrain.js';
@@ -72,9 +68,8 @@ export function teamBriefSection(result: TeamBrainResult<TeamBrainBrief>): strin
 export function sessionStartBannerFooter(
   viewerUrl: string,
   trialDaysLine: string | null,
-  teamBrainDiscoveryLine: string | null,
 ): string {
-  return `\n\nView Observations Live @ ${viewerUrl}\n${proTrialLine('session-start')}${trialDaysLine ? `\n${trialDaysLine}` : ''}${teamBrainDiscoveryLine ? `\n${teamBrainDiscoveryLine}` : ''}`;
+  return `\n\nView Observations Live @ ${viewerUrl}${trialDaysLine ? `\n${trialDaysLine}` : ''}`;
 }
 
 /**
@@ -454,15 +449,9 @@ export const contextHandler: EventHandler = {
     // local worker, so the link points there.
     const viewerUrl = serverRuntime ? serverRuntime.serverBaseUrl : getViewerBaseUrl(port);
     const showsBanner = showTerminalOutput && Boolean(displayContent);
-    // TeamBrain discovery: one line on the banner the user already reads, once
-    // per claude-mem version, and never once this install is in a team.
-    const teamBrainDiscoveryLine = showsBanner && !teamBrain && !hasShownTeamBrainDiscoveryNotice()
-      ? TEAMBRAIN_DISCOVERY_LINE
-      : null;
-    if (teamBrainDiscoveryLine) markTeamBrainDiscoveryNoticeShown();
     const systemMessage = composeSessionStartSystemMessage(
       showsBanner ? displayContent : null,
-      sessionStartBannerFooter(viewerUrl, trialDaysLine, teamBrainDiscoveryLine),
+      sessionStartBannerFooter(viewerUrl, trialDaysLine),
       workerOutageNotice,
     );
 

@@ -456,44 +456,6 @@
       }
     }
 
-    /* cmem Pro trial CTA — lives in .header-main so the responsive rules that
-       hide .icon-link on tablet/mobile leave it alone. */
-    .pro-trial-cta {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      height: 30px;
-      padding: 0 12px;
-      border: 1px solid var(--color-accent-primary);
-      border-radius: 999px;
-      color: var(--color-accent-primary);
-      background: var(--color-bg-card);
-      font-size: 12px;
-      font-weight: 500;
-      letter-spacing: -0.01em;
-      white-space: nowrap;
-      text-decoration: none;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .pro-trial-cta:hover {
-      background: var(--color-bg-card-hover);
-      border-color: var(--color-accent-focus);
-      transform: translateY(-1px);
-      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
-    }
-
-    .pro-trial-cta svg {
-      flex-shrink: 0;
-    }
-
-    /* Full pitch by default; the shortened label takes over on narrow screens. */
-    .pro-trial-cta-short {
-      display: none;
-    }
-
-    /* TeamBrain discovery link: quieter than the trial CTA beside it, and gone
-       once this install is in a team (Header.tsx). */
     .local-work-link {
       color: inherit;
       font-size: 12px;
@@ -505,28 +467,6 @@
       border-radius: 6px;
     }
     .local-work-link:hover { text-decoration: underline; }
-
-    .teambrain-cta {
-      display: inline-flex;
-      align-items: center;
-      height: 30px;
-      padding: 0 12px;
-      border: 1px solid var(--color-border-primary);
-      border-radius: 999px;
-      color: var(--color-text-secondary);
-      background: var(--color-bg-card);
-      font-size: 12px;
-      font-weight: 500;
-      white-space: nowrap;
-      text-decoration: none;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .teambrain-cta:hover {
-      color: var(--color-text-primary);
-      border-color: var(--color-border-focus);
-      background: var(--color-bg-card-hover);
-    }
 
     .icon-link {
       display: flex;
@@ -1487,18 +1427,8 @@
       }
 
       /* Hide icon links (docs, github, twitter) on tablet */
-      .icon-link,
-      .teambrain-cta {
+      .icon-link {
         display: none;
-      }
-
-      /* Keep the trial CTA, but drop to the shorter label */
-      .pro-trial-cta-full {
-        display: none;
-      }
-
-      .pro-trial-cta-short {
-        display: inline;
       }
 
       /* Feed adjustments */
@@ -1576,26 +1506,8 @@
       }
 
       /* Hide icon links on mobile */
-      .icon-link,
-      .teambrain-cta {
+      .icon-link {
         display: none;
-      }
-
-      /* The CTA stays — it is the whole point of the bar for free users.
-         Shortest label, sized to match the other mobile controls. */
-      .pro-trial-cta {
-        height: 28px;
-        padding: 0 10px;
-        font-size: 11px;
-        flex-shrink: 0;
-      }
-
-      .pro-trial-cta-full {
-        display: none;
-      }
-
-      .pro-trial-cta-short {
-        display: inline;
       }
 
       .settings-btn,
@@ -2812,8 +2724,6 @@
     /* Memory refinement: hierarchy and primary tasks. */
     .header { gap: 24px; }
     .header-main { flex-wrap: nowrap; gap: 16px; flex-shrink: 0; }
-    .pro-trial-cta .pro-trial-cta-full { display: none; }
-    .pro-trial-cta .pro-trial-cta-short { display: inline; }
     .status { min-width: 0; }
     .status .icon-link { color: var(--color-text-secondary); background: transparent; border-color: transparent; }
     .feed-content, .session-list-content { width: 100%; max-width: 760px; }

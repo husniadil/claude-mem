@@ -1,18 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
 import {
   fetchTeamBrainStatus,
   fetchTeamBrief,
   formatTeamBrief,
-  hasShownTeamBrainDiscoveryNotice,
   leaveTeamBrainTeam,
-  markTeamBrainDiscoveryNoticeShown,
   searchTeamBrain,
   TEAM_BRIEF_MAX_CHARS,
   TEAM_BRIEF_RESERVE_CHARS,
-  TEAMBRAIN_DISCOVERY_NOTICE_MARKER,
   teamBrainConnection,
   teamBriefReserveChars,
   teamBrainStartUrl,
@@ -205,21 +199,6 @@ describe('formatTeamBrief and the start URL', () => {
   it('relayedBlock keeps line breaks and collapses blank runs', () => {
     expect(relayedBlock('a\r\nb\u2028c\n\n\n\nd\u202Ee', 100)).toBe('a\nb\nc\n\nd e');
     expect(relayedBlock('abcdef', 4)).toBe('abc…');
-  });
-});
-
-describe('TeamBrain discovery notice marker', () => {
-  it('shows once ever per install, whatever the marker holds', () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'claude-mem-teambrain-marker-'));
-    try {
-      expect(hasShownTeamBrainDiscoveryNotice(dataDir)).toBe(false);
-      markTeamBrainDiscoveryNoticeShown(dataDir);
-      expect(hasShownTeamBrainDiscoveryNotice(dataDir)).toBe(true);
-      writeFileSync(join(dataDir, TEAMBRAIN_DISCOVERY_NOTICE_MARKER), '13.39.0\n');
-      expect(hasShownTeamBrainDiscoveryNotice(dataDir)).toBe(true);
-    } finally {
-      rmSync(dataDir, { recursive: true, force: true });
-    }
   });
 });
 

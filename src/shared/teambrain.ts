@@ -13,9 +13,6 @@
  * result whose failure carries one plain line naming the reason.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
-import { paths } from './paths.js';
 import { MEMORY_PLUGIN_INSTRUCTIONS } from './memory-instructions.js';
 import { clipUtf16, relayedBlock, relayedLine } from './relayed-text.js';
 import type { SettingsDefaults } from './SettingsDefaultsManager.js';
@@ -476,26 +473,3 @@ export function teamBrainStartUrl(origin: string): string {
   return `${origin.replace(/\/+$/, '')}/teambrain/start`;
 }
 
-/**
- * Discovery: one line on the SessionStart banner, once per install (the
- * marker file's presence means it was shown), and never once the install is
- * in a team. The viewer link and the --help section are the lasting surfaces.
- */
-export const TEAMBRAIN_DISCOVERY_NOTICE_MARKER = 'teambrain-discovery-notice.marker';
-
-export const TEAMBRAIN_DISCOVERY_LINE =
-  'New: TeamBrain shows your team who is working on what, inside every session. Start one: npx claude-mem teambrain start';
-
-export function hasShownTeamBrainDiscoveryNotice(dataDir: string = paths.dataDir()): boolean {
-  return existsSync(join(dataDir, TEAMBRAIN_DISCOVERY_NOTICE_MARKER));
-}
-
-export function markTeamBrainDiscoveryNoticeShown(dataDir: string = paths.dataDir()): void {
-  try {
-    if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(dataDir, TEAMBRAIN_DISCOVERY_NOTICE_MARKER), new Date().toISOString(), { encoding: 'utf-8', mode: 0o600 });
-  } catch (error: unknown) {
-    // The notice is a nicety and must never fail SessionStart; it shows again next session.
-    logger.warn('HOOK', 'TeamBrain discovery marker could not be written', { dataDir }, error instanceof Error ? error : new Error(String(error)));
-  }
-}

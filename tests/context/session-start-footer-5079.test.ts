@@ -2,7 +2,6 @@ import { describe, expect, it } from 'bun:test';
 import { composeSessionStartSystemMessage, sessionStartBannerFooter } from '../../src/cli/handlers/context.js';
 import { CONTEXT_OUTPUT_LIMIT, TERMINAL_BANNER_RESERVE_CHARS } from '../../src/services/context/ContextBudget.js';
 import { fitContextForDelivery } from '../../src/services/context/ContextBuilder.js';
-import { TEAMBRAIN_DISCOVERY_LINE } from '../../src/shared/teambrain.js';
 import type { ContextConfig, Observation } from '../../src/services/context/types.js';
 
 // The SessionStart hook appends this footer to the terminal preview inside one
@@ -11,7 +10,6 @@ describe('SessionStart systemMessage stays within the field cap (#5079)', () => 
   const footer = sessionStartBannerFooter(
     'http://localhost:37777',
     'claude-mem free trial: 30 days left',
-    TEAMBRAIN_DISCOVERY_LINE,
   );
 
   it('fits the longest footer the hook composes in the reserved room', () => {
@@ -59,7 +57,7 @@ describe('SessionStart systemMessage stays within the field cap (#5079)', () => 
   it('keeps a full preview within the limit with a 300-character server viewer URL and an outage notice', () => {
     const serverViewerUrl = `https://memory.example.com/${'a'.repeat(300 - 'https://memory.example.com/'.length)}`;
     expect(serverViewerUrl.length).toBe(300);
-    const serverFooter = sessionStartBannerFooter(serverViewerUrl, 'claude-mem free trial: 30 days left', TEAMBRAIN_DISCOVERY_LINE);
+    const serverFooter = sessionStartBannerFooter(serverViewerUrl, 'claude-mem free trial: 30 days left');
     const preview = fullPreview();
     const withoutNotice = composeSessionStartSystemMessage(preview, serverFooter, null)!;
     expect(withoutNotice.length).toBeLessThanOrEqual(CONTEXT_OUTPUT_LIMIT);

@@ -1,13 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
 
 import * as realHookSettings from '../../../src/shared/hook-settings.js';
 import * as realOauthToken from '../../../src/shared/oauth-token.js';
 import * as realProjectName from '../../../src/utils/project-name.js';
 import * as realWorkerUtils from '../../../src/shared/worker-utils.js';
-import { paths } from '../../../src/shared/paths.js';
-import { TEAMBRAIN_DISCOVERY_LINE, TEAMBRAIN_DISCOVERY_NOTICE_MARKER } from '../../../src/shared/teambrain.js';
 import {
   MOCK_SEAT_SETUP_TOKEN,
   MOCK_SEAT_USER_ID,
@@ -55,8 +51,6 @@ afterAll(async () => {
   mock.module('../../../src/shared/worker-utils.js', () => realWorkerUtilsSnapshot);
 });
 
-const discoveryMarker = join(paths.dataDir(), TEAMBRAIN_DISCOVERY_NOTICE_MARKER);
-
 const NOT_JOINED: Record<string, string> = {
   CLAUDE_MEM_MEMORY_INSTRUCTIONS_ENABLED: 'false',
   CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT: 'false',
@@ -76,7 +70,6 @@ beforeEach(() => {
   teamBrain.requests.length = 0;
   teamBrain.state.brief = {};
   workerPaths.length = 0;
-  rmSync(discoveryMarker, { force: true });
 });
 
 async function sessionStart(input: Record<string, unknown> = {}) {
@@ -174,30 +167,12 @@ describe('fitTeamBriefSection', () => {
 describe('TeamBrain discovery notice', () => {
   const banner = { platform: 'claude-code', sessionSource: 'startup' };
 
-  it('rides the terminal banner once per install, then stays quiet', async () => {
+  // husni fork: the banner carries no TeamBrain pitch.
+  it('never rides the terminal banner of an install in no team', async () => {
     settings = { ...NOT_JOINED, CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT: 'true' };
     const first = await sessionStart(banner);
-    expect(first.systemMessage).toContain(TEAMBRAIN_DISCOVERY_LINE);
-    expect(first.systemMessage?.split(TEAMBRAIN_DISCOVERY_LINE)).toHaveLength(2);
-    // The model's context never carries the promotion.
+    expect(first.systemMessage).toBeDefined();
+    expect(first.systemMessage).not.toContain('TeamBrain');
     expect(first.hookSpecificOutput?.additionalContext).not.toContain('TeamBrain');
-
-    const second = await sessionStart(banner);
-    expect(second.systemMessage).not.toContain(TEAMBRAIN_DISCOVERY_LINE);
-  });
-
-  it('stays quiet for an install that saw it under an earlier version', async () => {
-    writeFileSync(discoveryMarker, '13.39.0');
-    settings = { ...NOT_JOINED, CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT: 'true' };
-    const result = await sessionStart(banner);
-    expect(result.systemMessage).toBeDefined();
-    expect(result.systemMessage).not.toContain(TEAMBRAIN_DISCOVERY_LINE);
-  });
-
-  it('is never shown once this install is in a team', async () => {
-    settings = { ...joined(), CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT: 'true' };
-    const result = await sessionStart(banner);
-    expect(result.systemMessage).toBeDefined();
-    expect(result.systemMessage).not.toContain(TEAMBRAIN_DISCOVERY_LINE);
   });
 });
