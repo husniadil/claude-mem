@@ -829,6 +829,8 @@ var init_SettingsDefaultsManager = __esm({
         // Browser-reachable base for the live-view URL when the
         // worker runs behind a port-forward (e.g.
         // https://37700.host.<user>.<domain>). Empty => localhost.
+        CLAUDE_MEM_WORKER_URL: "",
+        // a worker behind a proxy, as http(s)://host[:port][/prefix]: replaces HOST and PORT for requests, and implies CLAUDE_MEM_WORKER_AUTOSTART=false
         CLAUDE_MEM_API_TIMEOUT_MS: String(getTimeout(HOOK_TIMEOUTS.API_REQUEST)),
         CLAUDE_MEM_SESSION_INIT_TIMEOUT_MS: String(defaultSessionInitRequestTimeoutMs()),
         // 10s; 7s on Windows, whose hook start-up the budget never sees
@@ -992,6 +994,8 @@ var init_SettingsDefaultsManager = __esm({
         // Comma-separated glob patterns for excluded project paths
         CLAUDE_MEM_PROJECT_ENVIRONMENTS: "[]",
         // JSON array of {"name","patterns"}: directories matching an environment's globs share one project named after it
+        CLAUDE_MEM_SEARCH_SCOPE: "all",
+        // MCP memory tools: 'all' projects, or 'project' to hold a session to its own (mcp-memory-scope.ts)
         CLAUDE_MEM_FOLDER_MD_EXCLUDE: "[]",
         // JSON array of folder paths to exclude from CLAUDE.md generation
         CLAUDE_MEM_FOLDER_MD_SKELETON_DENYLIST: "[]",
@@ -2501,14 +2505,12 @@ var init_EnvManager = __esm({
 });
 
 // src/shared/pro-promo.ts
-var PRO_TRIAL_MAX_DAYS, PRO_TRIAL_LABEL, PLAN_USAGE_GAIN_PERCENT, PRO_TRIAL_PITCH;
+var PRO_TRIAL_MAX_DAYS, PRO_TRIAL_LABEL;
 var init_pro_promo = __esm({
   "src/shared/pro-promo.ts"() {
     "use strict";
     PRO_TRIAL_MAX_DAYS = 30;
     PRO_TRIAL_LABEL = `${PRO_TRIAL_MAX_DAYS} Day Free Trial`;
-    PLAN_USAGE_GAIN_PERCENT = 100;
-    PRO_TRIAL_PITCH = `${PRO_TRIAL_LABEL} \u2014 memory runs off-plan. Get up to ${PLAN_USAGE_GAIN_PERCENT}% more usage from your plan`;
   }
 });
 
