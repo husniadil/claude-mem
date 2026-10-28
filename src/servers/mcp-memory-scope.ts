@@ -32,8 +32,11 @@ export interface MemoryPolicy {
 // The tools a project-scoped session keeps. Each memory tool here passes the
 // project on to the worker, which filters by it. The corpus tools read corpora
 // built from any project, and the observation_* tools write as well, so they go.
+// So do team_brief and team_search, which read the team's memory across its
+// projects, and save_memory and the work_state tools, which write.
 const PROJECT_SCOPED_TOOLS = new Set([
   'important_workflow',
+  'dumb_search',
   'search',
   'timeline',
   'get_observations',
@@ -45,7 +48,7 @@ const PROJECT_SCOPED_TOOLS = new Set([
 ]);
 
 // The tools that read memory and take a project.
-const MEMORY_TOOLS = new Set(['search', 'timeline', 'get_observations', 'get_tool_uses', 'session_start_context']);
+const MEMORY_TOOLS = new Set(['dumb_search', 'search', 'timeline', 'get_observations', 'get_tool_uses', 'session_start_context']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 

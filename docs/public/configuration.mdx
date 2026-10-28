@@ -450,7 +450,7 @@ inherit it, so one machine can hold some sessions to less.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `CLAUDE_MEM_SEARCH_RECENCY_DAYS` | `90` | The same setting as above. The MCP server also applies it to every `search` call that gives no `dateStart`, filter-only ones included, by filling `dateStart` in itself. `0` means no limit. The `search` tool's description states the value in use |
-| `CLAUDE_MEM_SEARCH_SCOPE` | `all` | `project` holds a session to its own project, named from its working directory as the hooks name it: every memory tool is called with that project, and the corpus and `observation_*` tools are not offered |
+| `CLAUDE_MEM_SEARCH_SCOPE` | `all` | `project` holds a session to its own project, named from its working directory as the hooks name it: every memory tool is called with that project. The corpus, `observation_*`, `team_*`, `save_memory` and `work_state_*` tools are not offered. The MCP server over HTTP refuses it, since it serves many projects |
 
 The scope is applied by the MCP server, so it binds the model calling the
 tools. It does not stop a process that can reach the worker's HTTP port.

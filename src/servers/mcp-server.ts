@@ -1381,6 +1381,11 @@ async function main() {
  * and no parent heartbeat, since no single client owns this process.
  */
 async function mainHttp(options: McpHttpOptions) {
+  // The project scope is this process's working directory, and one HTTP server
+  // serves the sessions of many projects.
+  if (memory.scope === 'project') {
+    throw new Error('CLAUDE_MEM_SEARCH_SCOPE=project holds a stdio session to its working directory; the HTTP server serves many projects, so it has no project hold');
+  }
   const handle = await startMcpHttpServer({
     ...options,
     originPolicy: buildWorkerOriginPolicy(loadFromFileOnce()),

@@ -30,7 +30,7 @@ describe('MCP memory scope', () => {
 
   it('holds every memory tool to the project, whatever the model asked for', () => {
     const p = policy('project');
-    for (const tool of ['search', 'timeline', 'get_observations', 'get_tool_uses']) {
+    for (const tool of ['dumb_search', 'search', 'timeline', 'get_observations', 'get_tool_uses']) {
       expect(scopeArgs(p, tool, { project: 'agamemnon', ids: [1] }, NOW).project).toBe('husni');
     }
     const context = scopeArgs(p, 'session_start_context', { projects: ['agamemnon', 'logram'] }, NOW);
@@ -47,7 +47,11 @@ describe('MCP memory scope', () => {
     const p = policy('project');
     expect(isOffered(p, 'search')).toBe(true);
     expect(isOffered(p, 'smart_search')).toBe(true);
-    for (const tool of ['build_corpus', 'query_corpus', 'list_corpora', 'observation_search', 'observation_add']) {
+    expect(isOffered(p, 'dumb_search')).toBe(true);
+    for (const tool of [
+      'build_corpus', 'query_corpus', 'list_corpora', 'observation_search', 'observation_add',
+      'team_brief', 'team_search', 'save_memory', 'work_state_write', 'work_state_read',
+    ]) {
       expect(isOffered(p, tool)).toBe(false);
       expect(isOffered(policy('all'), tool)).toBe(true);
     }
@@ -85,5 +89,7 @@ describe('MCP memory scope', () => {
     expect(src).toContain('!isOffered(memory, tool.name)');
     expect(src).toContain('const args = scopeArgs(memory, tool.name,');
     expect(src).toContain('memoryPolicy(loadFromFileOnce(), process.cwd(), selectRuntime())');
+    // One HTTP server serves many projects, so it refuses a project scope.
+    expect(src).toMatch(/async function mainHttp[\s\S]*?if \(memory\.scope === 'project'\) \{\s*throw/);
   });
 });
