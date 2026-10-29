@@ -351,6 +351,37 @@ describe('focus step', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  // husni fork: on proxenos one request whose narrative gpt-6-luna kept writing past 1200 characters stopped every run
+  // before the focus step, so all 102 requests stayed "Sorting…".
+  it('a review the model keeps getting wrong is reported after the focus step and the story, which still run', async () => {
+    const dir = scratchDir('auto-refresh-review-refused');
+    try {
+      const database = fixtureDatabase();
+      requests(database, dir, ['b', 'c']);
+      const writer = focusWriter(database);
+      let reviewAsks = 0;
+      const ask = async (prompt: string) => {
+        if (prompt.includes('Do only section 2')) {
+          reviewAsks++;
+          const answer = JSON.parse(reviewAll(prompt));
+          answer.reviews[0].narrative = 'x'.repeat(1300);
+          return JSON.stringify(answer);
+        }
+        if (isOtherPass(prompt)) return JSON.stringify({ placements: [], proposals: [] });
+        if (prompt.includes('Do only section 3')) return everyRequestInOther(prompt);
+        return JSON.stringify({ narrative: 'Under way.', preferences: [] });
+      };
+      const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: 3, ungrouped: 0, goalsStale: false, unplaced: 3, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: writer.save });
+      const error = await task.run(ask, 'codex').then(() => null, failure => failure as Error);
+      expect(error?.message).toMatch(/^reviews: g_[0-9a-f]{12}: narrative is 1300 characters; it must be 1–1200/);
+      expect(reviewAsks).toBe(2);
+      expect(Object.keys(readLedger(dir).progress)).toHaveLength(2);
+      expect(readFocus(database, { localDeviceId: '' }).focusAreaIdByAnchor.size).toBe(3);
+      expect(readLedger(dir).story.narrative).toBe('Under way.');
+      expect(task.steps.map(timing => timing.step)).toEqual(['review', 'focus', 'focus', 'story']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('nothing to place: no focus question; a worker failure is not re-asked', async () => {
     const dir = scratchDir('auto-refresh-focus-fail');
     try {

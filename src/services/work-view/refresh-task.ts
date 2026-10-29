@@ -385,10 +385,13 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
         if (shows.length) throw new Error(`reviews: ${refusals.join('; ').slice(0, 500)}`);
       };
       // Batches are independent, so they run at once; every batch finishes (and saves) before a failure is reported.
+      // husni fork: neither the focus step nor the story needs every review, so a refused review is reported after
+      // both have run, like a failed focus step. Thrown here, one request the model kept refusing left every request
+      // unplaced ("Sorting…"), run after run.
       const batches: Array<Array<{ groupId: string }>> = [];
       for (let index = 0; index < due.length; index += REVIEW_BATCH) batches.push(due.slice(index, index + REVIEW_BATCH));
       const failed = (await Promise.allSettled(batches.map(batch => timed('review', () => reviewBatch(batch), { groups: batch.length })))).filter(outcome => outcome.status === 'rejected');
-      if (failed.length) throw (failed[0] as PromiseRejectedResult).reason;
+      const reviewError: unknown = failed.length ? (failed[0] as PromiseRejectedResult).reason : null;
       if (reviewed) done.push(`${reviewed} requests reviewed`);
 
       // Focus: place the requests not placed yet (changed since, or whose area is gone) in batches, each saved before the
@@ -468,6 +471,7 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
         ].join('\n\n'), answer => cli(['record-story'], answer));
         done.push(storyInput.update ? 'story updated' : 'story written');
       }
+      if (reviewError) throw reviewError;
       if (focusError) throw focusError;
       return done.length ? `${done.join(', ')}.` : 'Nothing was due.';
     } finally {
