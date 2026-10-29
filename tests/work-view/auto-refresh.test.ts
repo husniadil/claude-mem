@@ -229,6 +229,8 @@ describe('refresh task', () => {
           suppliedBasis = show.reviewBasis;
           // husni fork: the model is told to leave reviewBasis out; the refresh copies it from show.
           expect(prompt).toMatch(/without reviewBasis: the refresh copies it from that group's show output/);
+          // The skill text the prompt carries says the same, so the two instructions agree.
+          expect(prompt).toContain('When the automatic refresh asks for reviews without `reviewBasis`, leave it out: the refresh copies it from `show` itself.');
           // The first answer leaves the summary empty; the refusal is sent back and fixed.
           if (reviewAnswers++ === 0) return JSON.stringify({ reviews: [{ groupId: show.groupId, state: 'in-progress', percent: 40, summary: '' }] });
           expect(prompt).toMatch(/refused for these groups/);
