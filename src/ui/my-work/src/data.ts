@@ -405,6 +405,14 @@ export async function markAgentFinished(agentId: string): Promise<void> {
   applyWorkModel(await activeWorkDataSource.markAgentFinished(agentId))
 }
 
+/** husni fork: starts the automatic refresh now through the active source. True when a run started; rejects with the reason. */
+export async function refreshNow(): Promise<boolean> {
+  if (!activeWorkDataSource) throw new Error('No data source to refresh')
+  const model = await activeWorkDataSource.refreshNow()
+  applyWorkModel(model)
+  return model.refresh?.state === 'running'
+}
+
 /** Adds the MY-RULES.md import to ~/.claude/CLAUDE.md through the active source. */
 export async function loadRulesInClaudeCode(): Promise<void> {
   if (!activeWorkDataSource) throw new Error('No data source to load the rules from')

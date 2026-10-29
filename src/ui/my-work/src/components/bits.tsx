@@ -287,16 +287,43 @@ export function RefreshButton({ run, ids }: { run: Run; ids: string[] }) {
  * the user's own logged-in agent whenever something is due, so there is no
  * command to copy. Before its first run, the last saved run shows instead.
  */
-export function RefreshStatus({ refresh, run, ids, label = 'Last run' }: { refresh: AutoRefresh | null; run: SkillRun | null; ids: string[]; label?: string }) {
+export function RefreshStatus({ refresh, run, ids, label = 'Last run', onRefreshNow }: { refresh: AutoRefresh | null; run: SkillRun | null; ids: string[]; label?: string; onRefreshNow?: () => Promise<boolean> }) {
+  // husni fork: Refresh now, for the page that passes onRefreshNow. Its note stands until another refresh finishes.
+  const [asking, setAsking] = useState(false)
+  const [note, setNote] = useState<{ text: string; finishedAt: string | null } | null>(null)
+  const running = refresh?.state === 'running'
+  const finishedAt = refresh?.finishedAt ?? null
   let text: ReactNode = null
-  if (refresh?.state === 'running') text = <span className="inline-flex items-center gap-1.5"><Spinner />Updating your goals and progress…</span>
+  if (running) text = <span className="inline-flex items-center gap-1.5"><Spinner />Updating your goals and progress…</span>
+  else if (note && note.finishedAt === finishedAt) text = note.text
   else if (refresh?.error) text = refresh.state === 'waiting-for-agent' ? <>Waiting to refresh: {refresh.error}</> : <>Refresh failed: {refresh.error}</>
   else if (refresh?.finishedAt) text = <>Last refreshed {refresh.finishedAt}</>
   else if (run) text = <>{label} {run.lastRunAt}<br />on {run.deviceName}</>
-  if (!text) return null
+  if (!onRefreshNow) {
+    if (!text) return null
+    return (
+      <Req ids={[...ids, 'R14.10']}>
+        <span className="block w-full text-xs leading-tight text-muted-foreground sm:w-auto sm:text-right" aria-live="polite">{text}</span>
+      </Req>
+    )
+  }
+  const ask = () => {
+    setAsking(true)
+    setNote(null)
+    onRefreshNow()
+      .then((started) => { if (!started) setNote({ text: 'Nothing is due, so nothing ran.', finishedAt }) })
+      .catch((error: unknown) => setNote({ text: error instanceof Error ? error.message : String(error), finishedAt }))
+      .finally(() => setAsking(false))
+  }
   return (
     <Req ids={[...ids, 'R14.10']}>
-      <span className="block w-full text-xs leading-tight text-muted-foreground sm:w-auto sm:text-right" aria-live="polite">{text}</span>
+      <div className="flex w-full items-center gap-3 sm:w-auto">
+        <span className="min-w-0 flex-1 text-xs leading-tight text-muted-foreground sm:text-right" aria-live="polite">{text}</span>
+        <Button variant="outline" size="sm" className="h-11 min-w-11 md:h-8 md:min-w-0" onClick={ask} disabled={asking || running}>
+          {asking ? <Spinner /> : <RefreshCwIcon />}
+          Refresh now
+        </Button>
+      </div>
     </Req>
   )
 }

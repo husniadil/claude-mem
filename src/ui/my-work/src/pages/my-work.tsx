@@ -15,7 +15,7 @@ import { FocusHeader, OtherHeader } from '@/components/focus-header'
 import { RequestCard } from '@/components/request-card'
 import { cn } from '@/lib/utils'
 import { Req } from '@/spec/req'
-import { deviceById, markAgentFinished, needsYou, OTHER_FOCUS_AREA_ID, SAMPLE_RUNS, startedTimestamp, useWorkModel, type Agent as WorkAgent, type LiveState, type Request } from '@/data'
+import { deviceById, markAgentFinished, needsYou, OTHER_FOCUS_AREA_ID, refreshNow, SAMPLE_RUNS, startedTimestamp, useWorkModel, type Agent as WorkAgent, type LiveState, type Request } from '@/data'
 import type { BuildStory, RequestReadError } from '@/live/work-data-source'
 import { resolveFocusAreaId } from '@/live/to-focus-model'
 
@@ -383,7 +383,7 @@ export function MyWork({ focusAreaId, onOpen, onOpenFocus, onOpenRules }: { focu
           </div>
         ) : (refresh || lastRuns.progress) && (
           <div className="order-last w-full md:ml-auto md:w-auto">
-            <RefreshStatus refresh={refresh} run={lastRuns.progress} label="Last reviewed" ids={['R14.12']} />
+            <RefreshStatus refresh={refresh} run={lastRuns.progress} label="Last reviewed" ids={['R14.12']} onRefreshNow={refresh ? refreshNow : undefined} />
           </div>
         )}
         {/* Phone: the filters wrap to a second row instead of widening the page past the screen; the sort stays beside them. */}

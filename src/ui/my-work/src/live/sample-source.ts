@@ -164,6 +164,8 @@ export const sampleSource: WorkDataSource = {
   loadRulesInClaudeCode: loadSampleWorkModel,
   // Sample agents are fixtures with no recorded state to change.
   markAgentFinished: () => Promise.reject(new Error('Sample agents have no recorded state to change.')),
+  // Sample work has no worker to refresh; its RefreshButton plays a run on a timer instead.
+  refreshNow: () => Promise.reject(new Error('Sample work has no worker to refresh.')),
 
   /** Checking hands the request back to you to ship; it never marks it shipped. Fixtures have no fingerprint to guard. */
   async setRequestChecked(requestId, _expectedFingerprint, checked) {

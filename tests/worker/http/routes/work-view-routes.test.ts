@@ -9,6 +9,7 @@ import { isReportedReadyForCheck, WorkViewRoutes } from '../../../../src/service
 import { contentFingerprint } from '../../../../src/services/work-view/review-store.js';
 import { reduceWorkState } from '../../../../src/services/work-view/data-source.mjs';
 import { HumanCopyWorker } from '../../../../src/services/work-view/human-copy-worker.mjs';
+import type { AutoRefreshWorker } from '../../../../src/services/work-view/auto-refresh-worker.mjs';
 
 let directory: string;
 let source: Database;
@@ -25,8 +26,8 @@ function append(fields: Record<string, unknown>) {
     .run(nextId++, 'example-project', 'example-work', JSON.stringify(fields), Date.now());
 }
 
-async function start(humanCopy: HumanCopyWorker | null = null) {
-  routes = new WorkViewRoutes({ databasePath, reviewPath, pollIntervalMs: 20, humanCopy, ledgerDir: null, setupStatePath: join(directory, 'setup-state.json') });
+async function start(humanCopy: HumanCopyWorker | null = null, autoRefresh?: AutoRefreshWorker) {
+  routes = new WorkViewRoutes({ databasePath, reviewPath, pollIntervalMs: 20, humanCopy, autoRefresh, ledgerDir: null, setupStatePath: join(directory, 'setup-state.json') });
   const app = express();
   app.use(express.json());
   routes.setupRoutes(app);
@@ -487,5 +488,32 @@ describe('review content versions', () => {
     await snapshot();
     expect(calls).toBe(1);
     expect(JSON.parse(readFileSync(setupPath, 'utf8'))).toEqual(saved);
+  });
+});
+
+// husni fork: the owner's Refresh now.
+describe('refresh now', () => {
+  const refreshNow = (headers: Record<string, string> = { Origin: origin }) =>
+    fetch(`${origin}/api/work-view/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: '{}' });
+
+  it('starts the automatic refresh at once and answers with the snapshot', async () => {
+    await stop();
+    const reasons: string[] = [];
+    const autoRefresh = {
+      start() {}, close() {}, status: () => null,
+      runNow: async ({ reason }: { reason: string }) => { reasons.push(reason); return 'running' as const; },
+    } as unknown as AutoRefreshWorker;
+    await start(null, autoRefresh);
+
+    const response = await refreshNow();
+
+    expect(response.status).toBe(200);
+    expect(reasons).toEqual(['manual']);
+    expect(Array.isArray((await response.json()).humanRequests)).toBe(true);
+  });
+
+  it('answers 503 on a worker without the automatic refresh and refuses another site', async () => {
+    expect((await refreshNow()).status).toBe(503);
+    expect((await refreshNow({ Origin: 'https://evil.example' })).status).toBe(403);
   });
 });

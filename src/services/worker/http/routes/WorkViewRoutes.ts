@@ -525,6 +525,7 @@ export class WorkViewRoutes extends BaseRouteHandler {
     app.post('/api/work-view/agents/mark-finished', workViewLoopbackOnly, requireWorkViewOrigin, validateBody(markAgentFinishedBody), this.wrapHandler(this.markAgentFinished));
     app.post('/api/work-view/suggestions', workViewLoopbackOnly, requireWorkViewOrigin, validateBody(suggestionBody), this.wrapHandler(this.answerSuggestion));
     app.post('/api/work-view/rules/load-in-claude-code', workViewLoopbackOnly, requireWorkViewOrigin, this.wrapHandler(this.loadRulesInClaudeCode));
+    app.post('/api/work-view/refresh', workViewLoopbackOnly, requireWorkViewOrigin, this.wrapHandler(this.refreshNow));
     app.get('/api/setup/scan', workViewLoopbackOnly, this.wrapHandler((_req, res) => {
       if (!this.setupScan) { res.status(503).json({ error: 'The prompt scan is unavailable on this worker.' }); return; }
       res.setHeader('Cache-Control', 'no-store');
@@ -957,6 +958,23 @@ export class WorkViewRoutes extends BaseRouteHandler {
    * finished before the SubagentStop hook existed). Saved like a hook stop, with
    * its own source, so a later tool call from the agent still reopens it.
    */
+  /**
+   * husni fork: the owner's Refresh now. Starts the run the timer would start
+   * at its next check, when something is due, and answers at once with the
+   * snapshot: the run writes `running` before it waits on the agent, so the
+   * page shows it is updating. The timer's own schedule does not move.
+   */
+  private refreshNow = (_req: Request, res: Response): void => {
+    if (!this.autoRefresh) { res.status(503).json({ error: 'The automatic refresh is not running on this worker.' }); return; }
+    void this.autoRefresh.runNow({ reason: 'manual' }).catch((error: unknown) => {
+      logger.warn('HTTP', 'Refresh now failed to start', {}, error instanceof Error ? error : new Error(String(error)));
+    });
+    const snapshot = this.snapshot();
+    this.publish(snapshot);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(snapshot);
+  };
+
   private markAgentFinished = (req: Request, res: Response): void => {
     const { agentGroupId } = req.body as z.infer<typeof markAgentFinishedBody>;
     if (!this.appendWorkStateEntry) { res.status(503).json({ error: 'Saving agent state is unavailable on this worker.' }); return; }
