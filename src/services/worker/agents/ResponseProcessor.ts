@@ -13,6 +13,7 @@ import {
 } from '../../../sdk/output-classifier.js';
 import { updateCursorContextForProject } from '../../integrations/CursorHooksInstaller.js';
 import { notifyTelegram } from '../../integrations/TelegramNotifier.js';
+import { notifyNotion } from '../../integrations/NotionExporter.js';
 import { notifyGrokBotAwareness } from '../../integrations/GrokBotAwarenessPusher.js';
 import { notifyGrokBotBrainbeat } from '../../integrations/GrokBotBrainbeat.js';
 import { notifyGrokBotIndex } from '../../integrations/GrokBotIndexWriter.js';
@@ -30,6 +31,7 @@ import type { SessionManager } from '../SessionManager.js';
 import type { WorkerRef, StorageResult } from './types.js';
 import { broadcastObservation, broadcastSummary } from './ObservationBroadcaster.js';
 import { telemetryBuffer } from '../../telemetry/buffer.js';
+import { logChromaWriteFailure } from '../search/errors.js';
 
 type ObservationFileEvidenceMessage = Pick<PendingMessage, 'type' | 'tool_name' | 'tool_input'>;
 
@@ -38,8 +40,8 @@ export interface ObservationFileEvidence {
   files_modified: string[];
 }
 
-const READ_TOOL_NAMES = new Set(['Read']);
-const WRITE_TOOL_NAMES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'write_file']);
+const READ_TOOL_NAMES = new Set(['Read', 'read_file', 'view_file']);
+const WRITE_TOOL_NAMES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'write_file', 'edit_file']);
 const PATCH_TOOL_NAMES = new Set(['apply_patch']);
 
 export function extractObservationFileEvidence(messages: ReadonlyArray<ObservationFileEvidenceMessage>): ObservationFileEvidence {
@@ -129,6 +131,9 @@ function extractPathsFromToolInput(
   }
 
   const paths: string[] = [];
+  // A read's canonical `file_path` wins over a conflicting `path` (Kimi and
+  // OpenClaw send both), so reads never take `path`. agy's `Path` argument is
+  // mapped to `file_path` by its adapter (normalizeAgyToolInput).
   const directFields = mode === 'read'
     ? ['file_path', 'filePath', 'notebook_path', 'notebookPath', 'filePaths']
     : ['file_path', 'filePath', 'notebook_path', 'notebookPath', 'path', 'filePaths'];
@@ -393,6 +398,28 @@ function clearDebtForAnsweredWork(session: ActiveSession): void {
   session.consecutiveUnattendedGatewayResumes = 0;
 }
 
+/** finish_reason values that mean the reply hit its output-token cap (OpenAI-style and Gemini). */
+export function isOutputCapFinishReason(finishReason: string | null | undefined): boolean {
+  const reason = (finishReason ?? '').trim().toLowerCase();
+  return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
+ * Whether the reply ends in an `<observation>` the parser cannot store. Every
+ * whole block the parser reads is removed first, using its own matches
+ * (parseAgentXml: observations, the summary, a skip_summary), so an
+ * `<observation>` written inside a block's content (CDATA, prose about the
+ * format) is not mistaken for an unfinished block. Any opening left has no
+ * close after it, so it begins the cut-off tail.
+ */
+export function hasUnfinishedObservationBlock(text: string): boolean {
+  const outsideWholeBlocks = text
+    .replace(/<observation>[\s\S]*?<\/observation>/gi, '')
+    .replace(/<summary>[\s\S]*?<\/summary>/gi, '')
+    .replace(/<skip_summary(?:\s+reason="[^"]*")?\s*\/>/gi, '');
+  return /<observation>/i.test(outsideWholeBlocks);
+}
+
 export async function processAgentResponse(
   text: string,
   session: ActiveSession,
@@ -535,7 +562,7 @@ export async function processAgentResponse(
     const replyDiagnostics = {
       // An HTTP reply cut off at the output-token cap reads as xml/prose here;
       // name it, so a truncation is not mistaken for a skip (#3868).
-      ...(finishReason ? { finishReason, truncated: finishReason === 'length' || finishReason === 'MAX_TOKENS' } : {}),
+      ...(finishReason ? { finishReason, truncated: isOutputCapFinishReason(finishReason) } : {}),
       // Only an idle turn has a shape worth naming: blank text, thinking or
       // tool_use blocks only, or no content blocks at all (#3454).
       ...(outputClass === 'idle' && emptyOutputReason ? { emptyOutputReason } : {}),
@@ -633,6 +660,21 @@ export async function processAgentResponse(
       sessionId: session.sessionDbId,
     });
     return null;
+  }
+
+  // A reply cut off at the output-token cap can still hold complete blocks.
+  // They are stored, but the unfinished tail is lost, so say so: hitting the
+  // cap is never silent. A provider that reports no finish reason (the Claude
+  // SDK path) still shows a cut reply as an <observation> with no close.
+  const hasUnfinishedBlock = hasUnfinishedObservationBlock(text);
+  if (isOutputCapFinishReason(finishReason) || hasUnfinishedBlock) {
+    logger.error('PARSER', `${agentName} reply was cut off; storing its complete blocks, the unfinished tail is lost. Raise CLAUDE_MEM_OBSERVER_MAX_OUTPUT_TOKENS if this repeats`, {
+      sessionId: session.sessionDbId,
+      finishReason,
+      completeObservations: parsed.observations.length,
+      hasUnfinishedObservationBlock: hasUnfinishedBlock,
+      hasSummary: parsed.summary !== null,
+    });
   }
 
   // Valid parse — clear the invalid-output counter so transient misses don't
@@ -793,7 +835,8 @@ export async function processAgentResponse(
   // here must not erase a newer failure from a concurrent pool slot.
   if (result.observationIds.length > 0 || result.summaryId !== null) {
     recordObserverSuccess();
-    if (session.currentProvider && session.currentProvider !== 'codex') {
+    // A quota-fallback run proves its own credential works, not the spent primary one.
+    if (session.currentProvider && session.currentProvider !== 'codex' && !session.claudeAuthOverride) {
       clearQuotaCooldown(session.currentProvider);
     }
   }
@@ -890,6 +933,16 @@ export async function processAgentResponse(
     observations: fresh.observations,
     observationIds: fresh.observationIds,
     project: context.project,
+  });
+
+  // Optional Notion export (off unless CLAUDE_MEM_NOTION_ENABLED). Queues and
+  // returns; the upserts run in the background and never fail capture.
+  notifyNotion({
+    observations: fresh.observations,
+    observationIds: fresh.observationIds,
+    project: context.project,
+    memorySessionId: registeredMemorySessionId,
+    createdAtEpoch: result.createdAtEpoch,
   });
 
   // Growing Grok Bot INDEX: any new observation (any project) can fill a
@@ -1074,7 +1127,7 @@ async function syncAndBroadcastObservations(
         title: obs.title || '(untitled)'
       });
     }).catch((error) => {
-      logger.error('CHROMA', `${agentName} chroma sync failed, continuing without vector search`, {
+      logChromaWriteFailure('CHROMA', `${agentName} chroma sync failed, continuing without vector search`, {
         obsId,
         type: obs.type,
         title: obs.title || '(untitled)'
@@ -1164,7 +1217,7 @@ async function syncAndBroadcastSummary(
       request: summaryForStore.request || '(no request)'
     });
   }).catch((error) => {
-    logger.error('CHROMA', `${agentName} chroma sync failed, continuing without vector search`, {
+    logChromaWriteFailure('CHROMA', `${agentName} chroma sync failed, continuing without vector search`, {
       summaryId: result.summaryId,
       request: summaryForStore.request || '(no request)'
     }, error);

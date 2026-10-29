@@ -1,15 +1,24 @@
-import { mkdirSync, rmSync, statSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, statSync } from 'fs';
 import { join } from 'path';
 import {
   HOOK_SPOOL_FORWARD_CONTENT_TYPE,
   HookSpool,
+  remoteHookSpoolReceipt,
   type HookSpoolEntry,
   type HookSpoolForwardReply,
   type HookSpoolKind,
   type HookSpoolPayloadByKind,
 } from '../shared/hook-spool.js';
 import { normalizePlatformSource } from '../shared/platform-source.js';
-import { workerHttpRequest } from '../shared/worker-utils.js';
+import { workerHttpRequest, getWorkerHost } from '../shared/worker-utils.js';
+import { resolveWorkerScriptPath } from '../shared/worker-utils.js';
+import { spawn } from 'child_process';
+import { resolveDataDir } from '../shared/paths.js';
+import { sanitizeEnv } from '../supervisor/env-sanitizer.js';
+import { loadFromFileOnce } from '../shared/hook-settings.js';
+import { selectRuntime } from '../services/hooks/runtime-selector.js';
+import { REMOTE_SPOOL_PROTOCOL_VERSION, REMOTE_SPOOL_TIMEOUT_MS, REMOTE_SPOOL_REQUEST_TIMEOUT_MS, REMOTE_SPOOL_MAX_ENTRIES,
+  usesRemoteHookSpool, remoteHookSpoolToken } from '../shared/hook-spool-remote.js';
 import { logger } from '../utils/logger.js';
 
 export const SPOOL_NUDGE_TIMEOUT_MS = 250;
@@ -27,6 +36,9 @@ export const SPOOL_FORWARD_BUDGET_MS: Record<HookSpoolKind, number> = {
   summarize: 5_000,
   advisor_calls: 5_000,
   session_end: 1_000,
+  subagent_stop: 5_000,
+  deliverables: 5_000,
+  work_state_telemetry: SPOOL_NUDGE_TIMEOUT_MS,
 };
 
 /**
@@ -60,6 +72,143 @@ let pendingForward: Promise<void> | null = null;
 let forwardAgainBudgetMs = 0;
 
 /**
+ * Whether this hook hands its spool to upstream's POST /api/spool/ingest, which
+ * needs CLAUDE_MEM_WORKER_INGEST_TOKEN on this machine and on the worker's.
+ * Without a token a hook forwards through POST /api/spool/entries instead,
+ * whatever host the worker is on (husni fork), so no client needs a shared
+ * secret and a worker of either version takes its entries.
+ */
+function usesIngestTransport(settings: ReturnType<typeof loadFromFileOnce>): boolean {
+  return usesRemoteHookSpool(getWorkerHost(), settings.CLAUDE_MEM_HOOK_SPOOL_TRANSPORT)
+    && remoteHookSpoolToken(settings.CLAUDE_MEM_WORKER_INGEST_TOKEN) !== '';
+}
+let remoteUploadRequested = false;
+let pendingRemoteUpload: Promise<void> | null = null;
+let remoteUploadInFlight = false;
+let remoteUploadAgain = false;
+
+export async function uploadRemoteHookSpool(): Promise<void> {
+  const settings = loadFromFileOnce();
+  const token = remoteHookSpoolToken(settings.CLAUDE_MEM_WORKER_INGEST_TOKEN);
+  if (!token) {
+    logger.warn('HOOK', 'Remote hook capture is queued locally; configure CLAUDE_MEM_WORKER_INGEST_TOKEN on the client and worker');
+    return;
+  }
+  let deadline: number | null = null;
+  let attempted = 0;
+  let failed = false;
+  const canContinue = () => {
+    // Queue discovery runs in the uploader, outside the hook's latency budget.
+    deadline ??= Date.now() + REMOTE_SPOOL_TIMEOUT_MS;
+    return Date.now() < deadline && attempted < REMOTE_SPOOL_MAX_ENTRIES && !failed;
+  };
+  await new HookSpool().drain(async entry => {
+      attempted++;
+      try {
+        const response = await workerHttpRequest('/api/spool/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ protocolVersion: REMOTE_SPOOL_PROTOCOL_VERSION, entry }),
+          timeoutMs: REMOTE_SPOOL_REQUEST_TIMEOUT_MS,
+          idleTimeoutMs: REMOTE_SPOOL_REQUEST_TIMEOUT_MS,
+        });
+        if (!response.ok) {
+          let rejection: unknown;
+          try { rejection = await response.json(); } catch {}
+          if (response.status === 413 || (response.status === 400 && rejection !== null
+            && typeof rejection === 'object' && (rejection as Record<string, unknown>).code === 'INVALID_SPOOL_ENTRY')) {
+            logger.error('HOOK', 'Remote worker rejected a capture event; preserving it in corrupt/ and continuing', { status: response.status });
+            return 'rejected';
+          }
+          throw new Error(`Remote spool ingestion returned HTTP ${response.status}`);
+        }
+        const ack: unknown = await response.json();
+        if (ack === null || typeof ack !== 'object'
+          || (ack as Record<string, unknown>).protocolVersion !== REMOTE_SPOOL_PROTOCOL_VERSION
+          || (ack as Record<string, unknown>).status !== 'accepted'
+          || (ack as Record<string, unknown>).receipt !== remoteHookSpoolReceipt(entry)) {
+          throw new Error('Remote worker did not acknowledge the exact spool event');
+        }
+        return true;
+      } catch (error: unknown) {
+        failed = true;
+        logger.warn('HOOK', 'Remote hook capture remains queued locally; the next hook retries delivery', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      }
+  }, undefined, { shouldContinue: canContinue, verifyUnchanged: true, maxEntries: REMOTE_SPOOL_MAX_ENTRIES });
+}
+
+function scheduleRemoteHookSpoolUpload(): Promise<void> {
+  if (pendingRemoteUpload) return pendingRemoteUpload;
+  if (remoteUploadInFlight) {
+    remoteUploadAgain = true;
+    return Promise.resolve();
+  }
+  const upload = new Promise<void>(resolve => {
+    setImmediate(() => {
+      try {
+        startRemoteHookSpoolUpload();
+      } catch {
+        logger.warn('HOOK', 'Remote hook uploader could not start; retaining the outbox');
+      } finally { resolve(); }
+    });
+  });
+  pendingRemoteUpload = upload;
+  nudgesInFlight.add(upload);
+  void upload.finally(() => {
+    nudgesInFlight.delete(upload);
+    if (pendingRemoteUpload === upload) pendingRemoteUpload = null;
+  });
+  return upload;
+}
+
+function startRemoteHookSpoolUpload(): void {
+  const token = remoteHookSpoolToken(loadFromFileOnce().CLAUDE_MEM_WORKER_INGEST_TOKEN);
+  if (!token) {
+    logger.warn('HOOK', 'Remote hook capture is queued locally; configure CLAUDE_MEM_WORKER_INGEST_TOKEN on the client and worker');
+    return;
+  }
+  const currentScript = process.argv[1];
+  const script = currentScript && /worker-service\.(?:cjs|ts)$/.test(currentScript) && existsSync(currentScript)
+    ? currentScript : resolveWorkerScriptPath();
+  if (!script) {
+    logger.warn('HOOK', 'Remote hook upload entrypoint is unavailable; retaining the outbox');
+    return;
+  }
+  remoteUploadInFlight = true;
+  let completed = false;
+  const finish = () => {
+    if (completed) return;
+    completed = true;
+    remoteUploadInFlight = false;
+    if (remoteUploadAgain) {
+      remoteUploadAgain = false;
+      void scheduleRemoteHookSpoolUpload();
+    }
+  };
+  try {
+    const child = spawn(process.execPath, [script, 'upload-spool'], {
+      cwd: resolveDataDir(), env: sanitizeEnv(process.env),
+      detached: true, windowsHide: true, stdio: 'ignore',
+    });
+    child.once('error', () => {
+      logger.warn('HOOK', 'Remote hook uploader could not start; retaining the outbox');
+      finish();
+    });
+    child.once('exit', code => {
+      if (code !== 0) logger.warn('HOOK', 'Remote hook uploader exited unsuccessfully; retaining the outbox', { code });
+      finish();
+    });
+    child.unref();
+  } catch {
+    logger.warn('HOOK', 'Remote hook uploader could not start; retaining the outbox');
+    finish();
+  }
+}
+
+/**
  * Best-effort poke so a running worker drains now rather than on its fs.watch
  * event or safety sweep. Never spawns a worker, never rejects, and its outcome
  * is irrelevant: the spool file is already durable. Started as soon as the
@@ -71,6 +220,10 @@ let forwardAgainBudgetMs = 0;
  * the spool, or its sweep) takes every entry there is.
  */
 export function nudgeWorkerToDrainHookSpool(): Promise<void> {
+  if (usesIngestTransport(loadFromFileOnce())) {
+    remoteUploadRequested = true;
+    return scheduleRemoteHookSpoolUpload();
+  }
   if (pendingNudge) return pendingNudge;
   const nudge = (async () => {
     try {
@@ -221,7 +374,13 @@ export function forwardHookSpoolToWorker(budgetMs: number): Promise<void> {
  * each within its budget (spoolForwardBudgetMs of the event it followed).
  */
 export async function settleHookSpoolNudges(): Promise<void> {
+  if (!pendingNudge && !remoteUploadRequested && selectRuntime() === 'worker') {
+    if (usesIngestTransport(loadFromFileOnce()) && new HookSpool().hasEntries()) {
+      void nudgeWorkerToDrainHookSpool();
+    }
+  }
   await Promise.all([...nudgesInFlight]);
+  remoteUploadRequested = false;
 }
 
 /**
@@ -233,6 +392,10 @@ export async function settleHookSpoolNudges(): Promise<void> {
 export function spoolHookEvent<K extends HookSpoolKind>(kind: K, payload: HookSpoolPayloadByKind[K]): string {
   const entryPath = new HookSpool().enqueue(kind, payload);
   logger.debug('HOOK', 'Hook event spooled for the worker', { kind, entryPath });
-  void forwardHookSpoolToWorker(spoolForwardBudgetMs(kind, payload.platformSource));
+  if (usesIngestTransport(loadFromFileOnce())) {
+    void nudgeWorkerToDrainHookSpool();
+  } else {
+    void forwardHookSpoolToWorker(spoolForwardBudgetMs(kind, payload.platformSource));
+  }
   return entryPath;
 }

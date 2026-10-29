@@ -37,6 +37,8 @@
           "installation",
           "t3code-integration",
           "usage/getting-started",
+          "usage/my-work",
+          "usage/teambrain",
           "usage/openrouter-provider",
           "usage/gemini-provider",
           "usage/openai-compatible-provider",
@@ -99,9 +101,11 @@
           "troubleshooting",
           "platform-integration",
           "openclaw-integration",
+          "hermes-integration",
           "kimi-integration",
           "qoder-integration",
-          "screenpipe-integration"
+          "screenpipe-integration",
+          "notion-export"
         ]
       },
       {
@@ -110,7 +114,8 @@
         "pages": [
           "hosted-server",
           "cloud-sync",
-          "cmem-pro-headless"
+          "cmem-pro-headless",
+          "usage/backups"
         ]
       },
       {

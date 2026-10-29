@@ -7,12 +7,13 @@ import { executeWithWorkerFallback, isWorkerFallback } from '../../shared/worker
 import { logger } from '../../utils/logger.js';
 import { parseJsonArray, formatTime, formatDate, formatHeaderDateTime } from '../../shared/timeline-formatting.js';
 import { closeSync, openSync, readSync, statSync } from 'fs';
+import { homedir } from 'os';
 import path from 'path';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { detectLanguage } from '../../services/smart-file-read/language-map.js';
-import { isTreeSitterCliAvailable } from '../../services/smart-file-read/tree-sitter-bin-path.js';
+import { checkTreeSitterCliLoadable } from '../../services/smart-file-read/tree-sitter-bin-path.js';
 import { resolveWithinWorkspace } from '../../services/smart-file-read/workspace-path.js';
 import { claimFileContextInjection } from './file-context-dedupe.js';
 import { memorySearchHandler } from './memory-search.js';
@@ -309,6 +310,8 @@ export function shouldDenyFullFileRead(
   // An install whose tree-sitter-cli never downloaded its binary answers
   // "Could not parse" to every smart_outline call, so routing Claude there
   // would strand it; the Read goes through with the timeline as context.
+  // The same holds for a present-but-unloadable binary (#4758): the file
+  // exists, but the smart tools cannot parse with it.
   return isSmartReadAvailable();
 }
 
@@ -377,7 +380,10 @@ export const fileContextHandler: EventHandler = {
         fileReadGateSetting,
         fileIsInsideWorkspace,
         fileHasMoreLinesThan,
-        isTreeSitterCliAvailable,
+        // The gate denies only where the smart tools can actually parse: a
+        // present-but-unloadable tree-sitter CLI (#4758) must not route Reads
+        // to smart_outline.
+        () => checkTreeSitterCliLoadable().loadable,
       )) {
         // Record the claim so a targeted Read that follows this denial does not
         // re-inject the timeline it already carried. The result is ignored on
@@ -428,6 +434,26 @@ export const fileContextHandler: EventHandler = {
   },
 };
 
+/**
+ * The `path` forms the by-file lookup sends, forward-slashed and de-duped: the
+ * absolute path, the cwd-relative path and, for a file under the home
+ * directory, its `~/` form. An observation can store the `~/` form a tool
+ * argument used (agy's `read_file` takes the path the model typed), and a
+ * lookup by the absolute path alone would miss it.
+ */
+export function fileHistoryQueryPaths(
+  absolutePath: string,
+  relativePath: string,
+  homeDirectory: string = homedir(),
+): string[] {
+  const absoluteForward = absolutePath.split(path.sep).join('/');
+  const homeForward = homeDirectory.split(path.sep).join('/');
+  const homeRelative = absoluteForward.startsWith(homeForward + '/')
+    ? '~/' + absoluteForward.slice(homeForward.length + 1)
+    : '';
+  return Array.from(new Set([absoluteForward, relativePath, homeRelative].filter(Boolean)));
+}
+
 async function lookupFileObservationHistory(
   input: NormalizedHookInput,
   filePath: string,
@@ -469,10 +495,7 @@ async function lookupFileObservationHistory(
   // never matched absolute-path storage. Send both candidate forms (forward-
   // slashed, de-duped) as repeated `path` params so the key matches across
   // both events regardless of how the path was stored.
-  const candidateQueryPaths = Array.from(new Set([
-    absolutePath.split(path.sep).join("/"),
-    relativePath,
-  ].filter(Boolean)));
+  const candidateQueryPaths = fileHistoryQueryPaths(absolutePath, relativePath);
   const queryParams = new URLSearchParams();
   for (const candidate of candidateQueryPaths) {
     queryParams.append('path', candidate);
