@@ -31,7 +31,7 @@ import { ledgerSignature, readLedger } from '../../../work-view/request-groups.m
 import { configuredJudge, decideSuggestion } from '../../../work-view/request-judge.mjs';
 import { configuredFocusJudge } from '../../../work-view/focus-judge.mjs';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
-import { isForeignLoopbackBrowserWrite } from './SettingsRoutes.js';
+import { isForeignViewerRequest, isViewerOriginHost, viewerOrigins } from '../viewer-origins.js';
 import { validateBody } from '../middleware/validateBody.js';
 import type { SetupScan, SetupScanState } from '../../../prompt-import/setup-scan.js';
 import { readHistoryCounts, type HistoryImport } from '../../../setup/history-import.js';
@@ -83,8 +83,10 @@ const reviewBody = z.object({
 
 // The viewer is local even when another worker surface is explicitly exposed.
 // Match the existing request-auth helpers, including rejecting proxy headers.
+// husni fork: a request sent to a configured viewer origin's name is the viewer too.
 export function workViewLoopbackOnly(req: Request, res: Response, next: NextFunction): void {
-  if (!isLocalhost(req) || !hasLoopbackHostHeader(req) || hasForwardedClientHeaders(req)) {
+  const loopback = isLocalhost(req) && hasLoopbackHostHeader(req) && !hasForwardedClientHeaders(req);
+  if (!loopback && !isViewerOriginHost(req.headers.host, viewerOrigins())) {
     res.status(403).json({ error: 'Work view is available only on this computer.' });
     return;
   }
@@ -92,10 +94,11 @@ export function workViewLoopbackOnly(req: Request, res: Response, next: NextFunc
 }
 
 // Browser writes must come from the viewer's own page. The Origin check is main's
-// shared settings guard (isForeignLoopbackBrowserWrite); the work view also rejects
+// shared settings guard (isForeignLoopbackBrowserWrite, which the husni fork widens
+// to the configured viewer origins in isForeignViewerRequest); the work view also rejects
 // cross-site fetch metadata and non-JSON bodies.
 export function requireWorkViewOrigin(req: Request, res: Response, next: NextFunction): void {
-  const valid = req.get('sec-fetch-site') !== 'cross-site' && !isForeignLoopbackBrowserWrite(req);
+  const valid = req.get('sec-fetch-site') !== 'cross-site' && !isForeignViewerRequest(req);
   if (!valid || !req.is('application/json')) {
     res.status(403).json({ error: 'Review changes must come from the local work viewer.' });
     return;
@@ -450,7 +453,7 @@ export class WorkViewRoutes extends BaseRouteHandler {
     // It reads real files, so another local page (which worker CORS lets read responses) is refused:
     // a cross-origin fetch carries its Origin, while the viewer opens files from its own origin.
     app.get('/api/work-view/file/:kind/:id/:index', workViewLoopbackOnly, this.wrapHandler((req, res) => {
-      if (req.get('sec-fetch-site') === 'cross-site' || isForeignLoopbackBrowserWrite(req)) {
+      if (req.get('sec-fetch-site') === 'cross-site' || isForeignViewerRequest(req)) {
         res.status(403).json({ error: 'Recorded files open only from the local work viewer.' });
         return;
       }
@@ -470,7 +473,7 @@ export class WorkViewRoutes extends BaseRouteHandler {
     // through its record; the filename in the URL must be the copy's own, so a link never names another file.
     // Same sandbox and same-origin rules as a recorded file. Text and markdown open inline as plain text.
     app.get('/api/deliverables/:id/:filename', workViewLoopbackOnly, this.wrapHandler((req, res) => {
-      if (req.get('sec-fetch-site') === 'cross-site' || isForeignLoopbackBrowserWrite(req)) {
+      if (req.get('sec-fetch-site') === 'cross-site' || isForeignViewerRequest(req)) {
         res.status(403).json({ error: 'Deliverables open only from the local work viewer.' });
         return;
       }

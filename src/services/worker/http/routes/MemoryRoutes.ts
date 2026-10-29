@@ -9,7 +9,7 @@ import { getProjectContext } from '../../../../utils/project-name.js';
 import { isProjectExcluded } from '../../../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
-import { isForeignLoopbackBrowserWrite } from './SettingsRoutes.js';
+import { isForeignViewerRequest } from '../viewer-origins.js';
 
 const saveMemorySchema = z.object({
   text: z.string().trim().min(1),
@@ -35,7 +35,7 @@ export class MemoryRoutes extends BaseRouteHandler {
     // An explicit save writes a user-visible memory observation, so other
     // localhost pages may not trigger it. Origin-less clients (the MCP
     // save_memory tool, Hermes, grok-bot) keep the existing loopback-trust model.
-    if (isForeignLoopbackBrowserWrite(req)) {
+    if (isForeignViewerRequest(req)) {
       res.status(403).json({ error: 'Memory saves from a different localhost origin are not allowed' });
       return;
     }
