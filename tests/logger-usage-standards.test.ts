@@ -61,6 +61,7 @@ const EXCLUDED_PATTERNS = [
   /servers\/worker-restart\.ts$/,  // MCP refused-connection retry; the restart is logged by ensureWorkerConnection and failures by callWorker in mcp-server.ts
   /servers\/request-context\.ts$/,  // AsyncLocalStorage holder for the per-call project directory: no I/O and no failure path to log; mcp-http.ts logs the sessions
   /worker\/http\/origin-policy\.ts$/,  // Pure Origin predicates moved out of middleware.ts; the guards that refuse a request (middleware.ts, mcp-http.ts) log it
+  /worker\/http\/viewer-origins\.ts$/,  // husni fork: pure viewer-origin predicates plus one settings read; the WorkViewRoutes and MemoryRoutes guards answer the refusal
 ];
 
 const HIGH_PRIORITY_PATTERNS = [
