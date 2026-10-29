@@ -371,12 +371,15 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       /** One batch of reviews. Like step(), but a refusal re-asks only for the groups that were refused. */
       const reviewBatch = async (groups: Array<{ groupId: string }>) => {
         let shows = groups.map(group => cli(['show', group.groupId]));
+        // husni fork: reviewBasis is copied from show here rather than by the model. Asked to copy that JSON string
+        // verbatim, a model dropped a bracket at the end of a 14 KB answer (Oct 29), and the whole answer was unreadable.
+        const basisById = new Map<string, unknown>(shows.map(show => [show.groupId, show.reviewBasis]));
         let refusals: string[] = [];
         let text = '';
         for (let attempt = 0; attempt < 2 && shows.length; attempt++) {
           text = await ask([
             requestProgress, '---', readOnly,
-            `Do only section 2's review for the groups whose \`show\` output is in ${writeInput('show', shows)}: decide each one from the evidence as the reviewer task describes (amend the previous review for a group in "amend" mode). Reply with only {"reviews": [<one record-progress input per group, with reviewBasis copied verbatim from its show output>]}.`,
+            `Do only section 2's review for the groups whose \`show\` output is in ${writeInput('show', shows)}: decide each one from the evidence as the reviewer task describes (amend the previous review for a group in "amend" mode). Reply with only {"reviews": [<one record-progress input per group, without reviewBasis: the refresh copies it from that group's show output>]}.`,
             refusals.length ? `Your previous answer was refused for these groups:\n${refusals.join('\n')}\nFix them and answer again for those groups only.` : '',
           ].join('\n\n'), attempt === 0 ? STEP_MODELS.review : CAREFUL_RETRY_MODELS);
           let reviews: Array<{ groupId?: string }> = [];
@@ -385,7 +388,9 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
           refusals = [];
           const recorded = new Set<string>();
           for (const review of reviews) {
-            try { cli(['record-progress'], review); recorded.add(String(review.groupId)); reviewed++; }
+            // A group outside this batch gets no basis, so the validator still refuses it.
+            const reviewBasis = basisById.get(String(review.groupId));
+            try { cli(['record-progress'], reviewBasis ? { ...review, reviewBasis } : review); recorded.add(String(review.groupId)); reviewed++; }
             catch (error) { refusals.push(`${review.groupId}: ${error instanceof Error ? error.message : String(error)}`); }
           }
           shows = shows.filter(show => !recorded.has(show.groupId));

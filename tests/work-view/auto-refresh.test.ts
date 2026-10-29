@@ -211,6 +211,7 @@ describe('refresh task', () => {
       const prompts: string[] = [];
       const models: unknown[] = [];
       let reviewAnswers = 0;
+      let suppliedBasis: { checkedThrough: string; conversations: string[] } | null = null;
       const ask = async (prompt: string, stepModels: unknown) => {
         prompts.push(prompt);
         models.push(stepModels);
@@ -225,10 +226,14 @@ describe('refresh task', () => {
           const supplied = prompt.split(`--- ${file} ---\n`)[1];
           expect(supplied).toBeDefined();
           const [show] = JSON.parse(supplied);
-          // The first answer forgets reviewBasis; the refusal is sent back and fixed.
-          if (reviewAnswers++ === 0) return JSON.stringify({ reviews: [{ groupId: show.groupId, state: 'in-progress', percent: 40, summary: 'Cards are being built.' }] });
+          suppliedBasis = show.reviewBasis;
+          // husni fork: the model is told to leave reviewBasis out; the refresh copies it from show.
+          expect(prompt).toMatch(/without reviewBasis: the refresh copies it from that group's show output/);
+          // The first answer leaves the summary empty; the refusal is sent back and fixed.
+          if (reviewAnswers++ === 0) return JSON.stringify({ reviews: [{ groupId: show.groupId, state: 'in-progress', percent: 40, summary: '' }] });
           expect(prompt).toMatch(/refused for these groups/);
-          return JSON.stringify({ reviews: [{ groupId: show.groupId, state: 'in-progress', percent: 40, summary: 'Cards are being built.', reviewBasis: show.reviewBasis }] });
+          // A reviewBasis the model sends anyway is replaced with the one show gave.
+          return JSON.stringify({ reviews: [{ groupId: show.groupId, state: 'in-progress', percent: 40, summary: 'Cards are being built.', reviewBasis: { checkedThrough: '2000-01-01T00:00:00.000Z', conversations: [] } }] });
         }
         if (prompt.includes('Do only section 3')) return everyRequestInOther(prompt);
         if (prompt.includes('Do only section 4')) return JSON.stringify({ narrative: 'One request is under way.', preferences: [] });
@@ -238,6 +243,8 @@ describe('refresh task', () => {
       const ledger = readLedger(dir);
       expect(Object.values(ledger.groups.groups).map((group: any) => group.title)).toEqual(['Release cards']);
       expect(Object.values(ledger.progress).map((review: any) => review.percent)).toEqual([40]);
+      expect(Object.values(ledger.progress).map((review: any) => [review.reviewedThrough, review.reviewedConversations]))
+        .toEqual([[suppliedBasis!.checkedThrough, suppliedBasis!.conversations]]);
       expect(ledger.story.narrative).toBe('One request is under way.');
       // Grouping and the focus step run on the light models; reviews and the story on the careful ones.
       // The focus step asks twice: place the request, then propose from Other (where it landed).
