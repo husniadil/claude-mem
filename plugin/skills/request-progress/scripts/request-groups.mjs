@@ -1122,6 +1122,8 @@ var init_SettingsDefaultsManager = __esm({
         // Backend-supplied model paired with CLAUDE_MEM_PRO_MEMORY_KEY
         CLAUDE_MEM_WORK_VIEW_AUTO_REFRESH: "true",
         // 'false' = My Work never runs owner-goals / request-progress on its own (refresh.json in ~/.claude-mem/work-view)
+        CLAUDE_MEM_WORK_VIEW_REFRESH_MINUTES: "10",
+        // husni fork: minutes between the automatic refresh's checks (1–1440), read when the worker starts
         // Automatic local DB snapshots (BackupManager). Off by default; opt-in.
         CLAUDE_MEM_BACKUP_ENABLED: "false",
         CLAUDE_MEM_BACKUP_INTERVAL_HOURS: "24",
