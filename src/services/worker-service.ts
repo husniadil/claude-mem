@@ -589,7 +589,11 @@ export class WorkerService implements WorkerRef {
     // a tool use holds, and the hook caps a batch well below this limit.
     this.server.app.post(
       '/api/spool/entries',
-      ...hookSpoolEntriesHandlers(this.hookSpool, () => void this.hookSpoolDrainer.requestDrain()),
+      ...hookSpoolEntriesHandlers(
+        this.hookSpool,
+        () => void this.hookSpoolDrainer.requestDrain(),
+        () => hookSpoolConsumedMarkers(this.dbManager.getSessionStore()),
+      ),
     );
 
     this.workViewRoutes = new WorkViewRoutes({

@@ -31,7 +31,14 @@ beforeEach(async () => {
   ];
   const app = express();
   createMiddleware().forEach(middleware => app.use(middleware));
-  app.post('/api/spool/entries', ...hookSpoolEntriesHandlers(workerSpool, () => { drainRequests++; }));
+  const consumed = new Set<string>();
+  const markers = {
+    isConsumed: (key: string) => consumed.has(key),
+    markConsumed: (key: string) => { consumed.add(key); },
+    clearConsumed: (key: string) => { consumed.delete(key); },
+    pruneConsumedBefore: () => {},
+  };
+  app.post('/api/spool/entries', ...hookSpoolEntriesHandlers(workerSpool, () => { drainRequests++; }, () => markers));
   await new Promise<void>(resolve => {
     server = app.listen(0, '127.0.0.1', () => resolve());
   });

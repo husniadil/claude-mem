@@ -101,14 +101,19 @@ export function hookSpoolConsumedMarkers(store: SessionStore): HookSpoolConsumed
 
 /**
  * A hook's forwarded entries (POST /api/spool/entries), written into this
- * worker's spool under their own keys and timestamps, so the drain takes them
- * like entries a hook here wrote. The reply names the entries now durable
- * here, and the hook removes only those. A hook that spools into this very
- * directory is told so, and nothing is written.
+ * worker's spool keeping their timestamps, so the drain takes them like
+ * entries a hook here wrote. The reply names the entries now durable here, and
+ * the hook removes only those. A hook that spools into this very directory is
+ * told so, and nothing is written.
+ *
+ * husni fork: each is written under a receipt for its content, as upstream's
+ * /api/spool/ingest does, so an entry the hook sends again after losing the
+ * reply (a timeout while the worker was slow) is not ingested a second time.
  */
 export function acceptForwardedHookSpoolEntries(
   spool: HookSpool,
   body: unknown,
+  consumedMarkers: HookSpoolConsumedMarkers,
 ): { ok: true; reply: HookSpoolForwardReply } | { ok: false; error: string } {
   const request = body as { spoolId?: unknown; entries?: unknown } | null;
   if (request === null || typeof request !== 'object' || typeof request.spoolId !== 'string' || !Array.isArray(request.entries)) {
@@ -126,7 +131,7 @@ export function acceptForwardedHookSpoolEntries(
       return;
     }
     try {
-      spool.enqueueEntry(entry);
+      spool.enqueueRemote(entry, consumedMarkers);
       accepted.push(index);
     } catch (error) {
       logger.error('HOOK', 'Could not write a forwarded hook spool entry; the hook keeps it', {
@@ -142,7 +147,11 @@ export function acceptForwardedHookSpoolEntries(
  * POST /api/spool/entries: the body parser and the handler. The route's own
  * content type keeps the app-wide 5 MB JSON parser off it.
  */
-export function hookSpoolEntriesHandlers(spool: HookSpool, requestDrain: () => void): RequestHandler[] {
+export function hookSpoolEntriesHandlers(
+  spool: HookSpool,
+  requestDrain: () => void,
+  consumedMarkers: () => HookSpoolConsumedMarkers,
+): RequestHandler[] {
   return [
     express.raw({ type: HOOK_SPOOL_FORWARD_CONTENT_TYPE, limit: '64mb' }),
     (req: Request, res: Response) => {
@@ -153,7 +162,7 @@ export function hookSpoolEntriesHandlers(spool: HookSpool, requestDrain: () => v
         res.status(400).json({ error: `Body must be JSON sent as ${HOOK_SPOOL_FORWARD_CONTENT_TYPE}` });
         return;
       }
-      const result = acceptForwardedHookSpoolEntries(spool, body);
+      const result = acceptForwardedHookSpoolEntries(spool, body, consumedMarkers());
       if (!result.ok) {
         res.status(400).json({ error: result.error });
         return;

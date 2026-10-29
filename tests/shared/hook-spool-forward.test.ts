@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { HookSpool, type HookSpoolEntry, type HookSpoolForwardReply } from '../../src/shared/hook-spool.js';
+import { HookSpool, type HookSpoolConsumedMarkers, type HookSpoolEntry, type HookSpoolForwardReply } from '../../src/shared/hook-spool.js';
 import { acceptForwardedHookSpoolEntries } from '../../src/services/worker/hook-spool-drain.js';
 import { forwardHookSpool, type HookSpoolForwardSend } from '../../src/cli/spool-hook-event.js';
 import { logger } from '../../src/utils/logger.js';
@@ -30,10 +30,21 @@ function entryFiles(spool: HookSpool): string[] {
   return readdirSync(spool.directory).filter(name => name.endsWith('.json')).sort();
 }
 
+/** The worker database's consumed markers, kept in memory. */
+function memoryMarkers(): HookSpoolConsumedMarkers {
+  const consumed = new Set<string>();
+  return {
+    isConsumed: key => consumed.has(key),
+    markConsumed: key => { consumed.add(key); },
+    clearConsumed: key => { consumed.delete(key); },
+    pruneConsumedBefore: () => {},
+  };
+}
+
 /** A worker on another disk, answering the way POST /api/spool/entries does. */
-function workerOn(workerSpool: HookSpool): HookSpoolForwardSend {
+function workerOn(workerSpool: HookSpool, markers: HookSpoolConsumedMarkers = memoryMarkers()): HookSpoolForwardSend {
   return async (entries, spoolId) => {
-    const result = acceptForwardedHookSpoolEntries(workerSpool, JSON.parse(JSON.stringify({ spoolId, entries })));
+    const result = acceptForwardedHookSpoolEntries(workerSpool, JSON.parse(JSON.stringify({ spoolId, entries })), markers);
     if (!result.ok) throw new Error(result.error);
     return result.reply;
   };
@@ -121,17 +132,38 @@ describe('HookSpool.forward', () => {
 });
 
 describe('acceptForwardedHookSpoolEntries', () => {
-  it('writes each entry into the worker spool under its own key and timestamp', () => {
+  it('writes each entry into the worker spool under a receipt for its content, keeping its timestamp', () => {
     const hook = new HookSpool(join(root, 'hook'));
     const worker = new HookSpool(join(root, 'worker'));
     hook.enqueue('observation', observation('toolu_1'), 1_000);
     hook.enqueue('summarize', { contentSessionId: 'session-1', platformSource: 'claude', lastAssistantMessage: 'done' }, 2_000);
 
-    const result = acceptForwardedHookSpoolEntries(worker, { spoolId: hook.spoolId(), entries: hook.entries() });
+    const result = acceptForwardedHookSpoolEntries(worker, { spoolId: hook.spoolId(), entries: hook.entries() }, memoryMarkers());
 
     expect(result).toEqual({ ok: true, reply: { sameSpool: false, accepted: [0, 1] } });
-    expect(entryFiles(worker)).toEqual(entryFiles(hook));
+    expect(entryFiles(worker)).toHaveLength(2);
+    for (const name of entryFiles(worker)) expect(name).toMatch(/^remote_(observation|summarize)-[0-9a-f]{64}\.json$/);
     expect(worker.entries()).toEqual(hook.entries());
+  });
+
+  // husni fork: a hook whose request timed out keeps its entries and sends them again at its next run.
+  it('ingests an entry the hook sends again after losing the reply only once', async () => {
+    const hook = new HookSpool(join(root, 'hook'));
+    const worker = new HookSpool(join(root, 'worker'));
+    const markers = memoryMarkers();
+    hook.enqueue('subagent_stop', { contentSessionId: 'session-1', platformSource: 'claude', agentId: 'agent-1', cwd: '/repo' }, 1_000);
+    const request = { spoolId: hook.spoolId(), entries: hook.entries() };
+    const ingested: number[] = [];
+    const drain = () => worker.drain((entry, markHandedOff) => { markHandedOff(); ingested.push(entry.enqueuedAtEpochMs); return true; }, markers);
+
+    expect(acceptForwardedHookSpoolEntries(worker, request, markers)).toEqual({ ok: true, reply: { sameSpool: false, accepted: [0] } });
+    await drain();
+    // The worker has taken it, but the reply never reached the hook: the same entry comes again.
+    expect(acceptForwardedHookSpoolEntries(worker, request, markers)).toEqual({ ok: true, reply: { sameSpool: false, accepted: [0] } });
+    await drain();
+
+    expect(ingested).toEqual([1_000]);
+    expect(worker.entries()).toEqual([]);
   });
 
   it('writes nothing for a hook that spools into the worker spool itself', () => {
@@ -139,7 +171,7 @@ describe('acceptForwardedHookSpoolEntries', () => {
     shared.enqueue('observation', observation('toolu_1'), 1_000);
     const before = readFileSync(join(shared.directory, entryFiles(shared)[0]!), 'utf-8');
 
-    const result = acceptForwardedHookSpoolEntries(shared, { spoolId: shared.spoolId(), entries: shared.entries() });
+    const result = acceptForwardedHookSpoolEntries(shared, { spoolId: shared.spoolId(), entries: shared.entries() }, memoryMarkers());
 
     expect(result).toEqual({ ok: true, reply: { sameSpool: true, accepted: [] } });
     expect(readFileSync(join(shared.directory, entryFiles(shared)[0]!), 'utf-8')).toBe(before);
@@ -150,7 +182,7 @@ describe('acceptForwardedHookSpoolEntries', () => {
     const valid = { kind: 'observation', payload: observation('toolu_ok'), enqueuedAtEpochMs: 1_000 };
     const corrupt = { kind: 'observation', payload: { contentSessionId: 'session-1' }, enqueuedAtEpochMs: 2_000 };
 
-    const result = acceptForwardedHookSpoolEntries(worker, { spoolId: 'another-spool', entries: [corrupt, valid] });
+    const result = acceptForwardedHookSpoolEntries(worker, { spoolId: 'another-spool', entries: [corrupt, valid] }, memoryMarkers());
 
     expect(result).toEqual({ ok: true, reply: { sameSpool: false, accepted: [1] } });
     expect(worker.entries()).toHaveLength(1);
@@ -159,9 +191,9 @@ describe('acceptForwardedHookSpoolEntries', () => {
   it('rejects a body that is not a forward request', () => {
     const worker = new HookSpool(join(root, 'worker'));
 
-    expect(acceptForwardedHookSpoolEntries(worker, { entries: [] }).ok).toBe(false);
-    expect(acceptForwardedHookSpoolEntries(worker, { spoolId: 'x', entries: 'nope' }).ok).toBe(false);
-    expect(acceptForwardedHookSpoolEntries(worker, null).ok).toBe(false);
+    expect(acceptForwardedHookSpoolEntries(worker, { entries: [] }, memoryMarkers()).ok).toBe(false);
+    expect(acceptForwardedHookSpoolEntries(worker, { spoolId: 'x', entries: 'nope' }, memoryMarkers()).ok).toBe(false);
+    expect(acceptForwardedHookSpoolEntries(worker, null, memoryMarkers()).ok).toBe(false);
   });
 });
 
