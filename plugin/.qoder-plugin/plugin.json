@@ -1,6 +1,6 @@
 {
   "name": "claude-mem",
-  "version": "15.4.11",
+  "version": "15.4.12",
   "description": "Persistent memory and context compression for Qoder sessions.",
   "author": {
     "name": "Alex Newman",
