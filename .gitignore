@@ -25,6 +25,9 @@ bun.lock
 !workers/sync-hub/bun.lock
 !services/sync-api/bun.lock
 !src/ui/my-work/package-lock.json
+# husni fork: the root lockfile pins what the plugin bundles, so a release
+# built from a fresh install carries no library it was not built with before.
+!/package-lock.json
 # Bun's temp output from a `bun build --compile` it did not finish.
 .*.bun-build
 private/
