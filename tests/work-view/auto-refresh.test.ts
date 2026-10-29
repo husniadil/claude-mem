@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, jest } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { setFakeSpawn } from '../helpers/fake-spawn.js';
 import { EventEmitter } from 'node:events';
@@ -131,6 +131,57 @@ describe('automatic refresh scheduler', () => {
       expect(await worker.runNow({ reason: 'manual' })).toBe('failed');
       expect(worker.status()).toMatchObject({ state: 'failed', agent: 'gemini', error: 'gemini exited 1' });
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // husni fork: checks run on an interval from start(), so nextAt is its next tick and not when a run finished plus the interval.
+  const CHECK_MS = 30 * 60000;
+  const settle = async () => { for (let turn = 0; turn < 20; turn++) await Promise.resolve(); };
+
+  it('names the interval\'s next tick as nextAt, however long a run took', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'auto-refresh-'));
+    jest.useFakeTimers();
+    let now = NOW;
+    let finish = deferred<any>();
+    const worker = new AutoRefreshWorker({ localDeviceId: () => '', dir, openDatabase: handle(fixtureDatabase()), checkMs: CHECK_MS, now: () => now, runJob: () => finish.promise });
+    try {
+      worker.start();
+      await settle();
+      expect(worker.status()).toMatchObject({ state: 'running', nextAt: null });
+      now = NOW + 4 * 60000;
+      finish.resolve({ state: 'ok', agent: 'claude-code', result: 'done', error: null });
+      await settle();
+      expect(worker.status()).toMatchObject({ state: 'ok', finishedAt: new Date(NOW + 4 * 60000).toISOString(), nextAt: new Date(NOW + CHECK_MS).toISOString() });
+      // The interval fires on time, and the run it starts names the tick after it.
+      finish = deferred<any>();
+      now = NOW + CHECK_MS;
+      jest.advanceTimersByTime(CHECK_MS);
+      await settle();
+      expect(worker.status()).toMatchObject({ state: 'running', startedAt: new Date(NOW + CHECK_MS).toISOString() });
+      now = NOW + CHECK_MS + 7 * 60000;
+      finish.resolve({ state: 'failed', agent: 'claude-code', result: null, error: 'review refused' });
+      await settle();
+      expect(worker.status()).toMatchObject({ state: 'failed', nextAt: new Date(NOW + 2 * CHECK_MS).toISOString() });
+    } finally { worker.close(); jest.useRealTimers(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('names the interval\'s next tick as nextAt on a check that finds nothing due', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'auto-refresh-'));
+    jest.useFakeTimers();
+    let now = NOW;
+    const database = fixtureDatabase();
+    saveGoals(database, new Date(NOW).toISOString());
+    writeFileSync(join(dir, 'request-groups.json'), JSON.stringify({ version: 1, conversations: {}, groups: {}, ignored: { [key('a')]: 'not a goal' } }));
+    const worker = new AutoRefreshWorker({ localDeviceId: () => '', dir, openDatabase: handle(database), checkMs: CHECK_MS, now: () => now, runJob: async () => ({ state: 'ok', agent: null, result: null, error: null }) });
+    try {
+      now = NOW + 1500;
+      worker.start();
+      await settle();
+      expect(worker.status()).toMatchObject({ state: 'idle', nextAt: new Date(NOW + 1500 + CHECK_MS).toISOString() });
+      now = NOW + 1500 + CHECK_MS + 40;
+      jest.advanceTimersByTime(CHECK_MS);
+      await settle();
+      expect(worker.status()).toMatchObject({ state: 'idle', checkedAt: new Date(now).toISOString(), nextAt: new Date(NOW + 1500 + 2 * CHECK_MS).toISOString() });
+    } finally { worker.close(); jest.useRealTimers(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
 

@@ -27,7 +27,7 @@ export class AutoRefreshWorker {
   constructor({ dir, openDatabase, runJob, enabled = () => true, checkMs = TEN_MINUTES_MS, now = Date.now, log = () => {}, localDeviceId }) {
     if (typeof localDeviceId !== 'function') throw new TypeError('AutoRefreshWorker needs localDeviceId, the worker\'s sync device id.');
     Object.assign(this, { dir, openDatabase, runJob, enabled, checkMs, now, log, localDeviceId });
-    this.timer = null; this.closed = false; this.busy = false;
+    this.timer = null; this.closed = false; this.busy = false; this.nextCheckEpoch = null;
   }
 
   path() { return join(this.dir, 'refresh.json'); }
@@ -39,7 +39,15 @@ export class AutoRefreshWorker {
 
   write(status) { writeJsonAtomic(this.path(), status); }
 
-  start() { this.tick(); this.timer = setInterval(() => this.tick(), this.checkMs); this.timer.unref?.(); }
+  // husni fork: nextAt names the interval's next tick, which counts from start() and not from when a run finished.
+  start() {
+    this.nextCheckEpoch = this.now() + this.checkMs;
+    this.tick();
+    this.timer = setInterval(() => { this.nextCheckEpoch += this.checkMs; this.tick(); }, this.checkMs);
+    this.timer.unref?.();
+  }
+
+  nextAt() { return this.iso(this.nextCheckEpoch ?? this.now() + this.checkMs); }
 
   /** A timer check: a failure (e.g. no database yet) is logged and the next check tries again. */
   tick() { this.check().catch((error) => this.log('warn', 'Work view refresh check failed', { error: String(error?.message ?? error) })); }
@@ -66,7 +74,7 @@ export class AutoRefreshWorker {
     if (!needs.needed) {
       // A run this worker never finished was cut off by a restart.
       const interrupted = previous?.state === 'running';
-      this.write({ ...previous, state: interrupted ? 'failed' : previous?.state ?? 'idle', ...(interrupted ? { error: 'The previous refresh stopped before finishing.' } : {}), checkedAt: this.iso(), nextAt: this.iso(this.now() + this.checkMs), needs });
+      this.write({ ...previous, state: interrupted ? 'failed' : previous?.state ?? 'idle', ...(interrupted ? { error: 'The previous refresh stopped before finishing.' } : {}), checkedAt: this.iso(), nextAt: this.nextAt(), needs });
       return 'idle';
     }
     return this.run(needs, 'scheduled');
@@ -95,7 +103,7 @@ export class AutoRefreshWorker {
       const finishedAt = this.iso();
       this.write({
         state: outcome.state, reason, agent: outcome.agent ?? null, startedAt, finishedAt, needs,
-        result: outcome.result ?? null, error: outcome.error ?? null, nextAt: this.iso(this.now() + this.checkMs),
+        result: outcome.result ?? null, error: outcome.error ?? null, nextAt: this.nextAt(),
         // Per-step timings for measuring runs; My Work does not show them.
         ...(outcome.steps ? { steps: outcome.steps } : {}),
       });
