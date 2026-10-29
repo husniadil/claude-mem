@@ -287,6 +287,18 @@ export function configuredHumanCopyProvider(settingsPath = USER_SETTINGS_PATH): 
   });
 }
 
+/**
+ * husni fork: CLAUDE_MEM_WORK_VIEW_REFRESH_MINUTES as the refresh's check interval. While a conversation
+ * stays active its request is due on every check, so the interval decides how often the careful steps run.
+ * A value outside 1–1440 whole minutes is reported and the default of 10 is used.
+ */
+export function workViewRefreshMs(value: string | undefined, warn: (message: string) => void = () => {}): number {
+  const minutes = Number(value);
+  if (Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440) return minutes * 60000;
+  warn(`CLAUDE_MEM_WORK_VIEW_REFRESH_MINUTES is "${value ?? ''}", not a whole number of minutes from 1 to 1440; using 10.`);
+  return 10 * 60000;
+}
+
 /** My Work's automatic refresh on the user's own logged-in agent, unless
  * CLAUDE_MEM_WORK_VIEW_AUTO_REFRESH is 'false' (checked on every tick). */
 export function defaultAutoRefresh(ledgerDir: string, settingsPath = USER_SETTINGS_PATH, setupPath = setupStatePath(), setupActive = () => false,
@@ -299,6 +311,8 @@ export function defaultAutoRefresh(ledgerDir: string, settingsPath = USER_SETTIN
   return new AutoRefreshWorker({
     dir: ledgerDir,
     openDatabase,
+    checkMs: workViewRefreshMs(SettingsDefaultsManager.loadFromFile(settingsPath, true, { readOnly: true }).CLAUDE_MEM_WORK_VIEW_REFRESH_MINUTES,
+      message => logger.warn('WORKER', message)),
     // Setup's only extraction is hosted. Once setup is complete, ongoing refresh keeps its existing local path.
     enabled: () => !setupActive() && (readSetupState(setupPath).status === 'complete' || !hasActiveSetupSession(setupPath))
       && SettingsDefaultsManager.loadFromFile(settingsPath, true, { readOnly: true }).CLAUDE_MEM_WORK_VIEW_AUTO_REFRESH !== 'false',
