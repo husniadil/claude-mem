@@ -39,6 +39,9 @@ const SAVE_GOALS_FAILED_AFTER_WRITING_EXIT = 3;
 const LIGHT: StepModels = { 'claude-code': { model: 'haiku' }, codex: { model: 'gpt-6-luna', reasoningEffort: 'low' }, gemini: { model: 'flash-lite' } };
 const CAREFUL: StepModels = { 'claude-code': { model: 'sonnet' }, codex: {}, gemini: { model: 'flash' } };
 export const STEP_MODELS = { goals: CAREFUL, grouping: LIGHT, review: CAREFUL, focus: LIGHT, story: CAREFUL } as const;
+/** husni fork: a review the validator refused is asked again on Claude Code's strongest alias, so a host can run
+ * reviews on a cheap model for sonnet and spend a stronger one (opus) only on the requests it got wrong. */
+export const REVIEW_RETRY_MODELS: StepModels = { ...CAREFUL, 'claude-code': { model: 'opus' } };
 type Step = keyof typeof STEP_MODELS;
 
 const strictObject = (properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required: Object.keys(properties), properties });
@@ -369,7 +372,7 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
             requestProgress, '---', readOnly,
             `Do only section 2's review for the groups whose \`show\` output is in ${writeInput('show', shows)}: decide each one from the evidence as the reviewer task describes (amend the previous review for a group in "amend" mode). Reply with only {"reviews": [<one record-progress input per group, with reviewBasis copied verbatim from its show output>]}.`,
             refusals.length ? `Your previous answer was refused for these groups:\n${refusals.join('\n')}\nFix them and answer again for those groups only.` : '',
-          ].join('\n\n'), STEP_MODELS.review);
+          ].join('\n\n'), attempt === 0 ? STEP_MODELS.review : REVIEW_RETRY_MODELS);
           let reviews: Array<{ groupId?: string }> = [];
           try { const answer = parseAgentJson(text); reviews = Array.isArray(answer.reviews) ? answer.reviews : []; }
           catch { /* Every group in this batch is refused below as "no review was given". */ }

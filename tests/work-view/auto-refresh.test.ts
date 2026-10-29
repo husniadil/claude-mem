@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AutoRefreshWorker } from '../../src/services/work-view/auto-refresh-worker.mjs';
-import { buildRefreshTask, FOCUS_ANSWER_SCHEMA, GROUPING_ANSWER_SCHEMA, STEP_MODELS } from '../../src/services/work-view/refresh-task.js';
+import { buildRefreshTask, FOCUS_ANSWER_SCHEMA, GROUPING_ANSWER_SCHEMA, REVIEW_RETRY_MODELS, STEP_MODELS } from '../../src/services/work-view/refresh-task.js';
 import { readLedger, runCli } from '../../src/services/work-view/request-groups.mjs';
 import { scratchDir } from '../helpers/scratch-dir.js';
 import { everyRequestInOther, focusInputFrom, focusWriter, isOtherPass } from '../helpers/fake-focus-writer.js';
@@ -190,7 +190,9 @@ describe('refresh task', () => {
       expect(ledger.story.narrative).toBe('One request is under way.');
       // Grouping and the focus step run on the light models; reviews and the story on the careful ones.
       // The focus step asks twice: place the request, then propose from Other (where it landed).
-      expect(models).toEqual([STEP_MODELS.grouping, STEP_MODELS.review, STEP_MODELS.review, STEP_MODELS.focus, STEP_MODELS.focus, STEP_MODELS.story]);
+      // husni fork: the refused review is asked again on the retry models (Claude Code's opus).
+      expect(models).toEqual([STEP_MODELS.grouping, STEP_MODELS.review, REVIEW_RETRY_MODELS, STEP_MODELS.focus, STEP_MODELS.focus, STEP_MODELS.story]);
+      expect(REVIEW_RETRY_MODELS).toEqual({ 'claude-code': { model: 'opus' }, codex: {}, gemini: { model: 'flash' } });
       expect(STEP_MODELS.focus).toBe(STEP_MODELS.grouping);
       expect(STEP_MODELS.grouping).toEqual({ 'claude-code': { model: 'haiku' }, codex: { model: 'gpt-6-luna', reasoningEffort: 'low' }, gemini: { model: 'flash-lite' } });
       expect(STEP_MODELS.review).toEqual({ 'claude-code': { model: 'sonnet' }, codex: {}, gemini: { model: 'flash' } });
@@ -359,10 +361,10 @@ describe('focus step', () => {
       const database = fixtureDatabase();
       requests(database, dir, ['b', 'c']);
       const writer = focusWriter(database);
-      let reviewAsks = 0;
-      const ask = async (prompt: string) => {
+      const reviewModels: unknown[] = [];
+      const ask = async (prompt: string, models?: unknown) => {
         if (prompt.includes('Do only section 2')) {
-          reviewAsks++;
+          reviewModels.push(models);
           const answer = JSON.parse(reviewAll(prompt));
           answer.reviews[0].narrative = 'x'.repeat(1300);
           return JSON.stringify(answer);
@@ -374,7 +376,8 @@ describe('focus step', () => {
       const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: 3, ungrouped: 0, goalsStale: false, unplaced: 3, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: writer.save });
       const error = await task.run(ask, 'codex').then(() => null, failure => failure as Error);
       expect(error?.message).toMatch(/^reviews: g_[0-9a-f]{12}: narrative is 1300 characters; it must be 1–1200/);
-      expect(reviewAsks).toBe(2);
+      // husni fork: the second ask, for the refused request only, goes to the retry models.
+      expect(reviewModels).toEqual([STEP_MODELS.review, REVIEW_RETRY_MODELS]);
       expect(Object.keys(readLedger(dir).progress)).toHaveLength(2);
       expect(readFocus(database, { localDeviceId: '' }).focusAreaIdByAnchor.size).toBe(3);
       expect(readLedger(dir).story.narrative).toBe('Under way.');
