@@ -545,7 +545,10 @@ describe('overall requests and progress reviews', () => {
       .toEqual([['Keep the design.', null], ['Ship daily.', 'owner-goals']]);
     // The agent gets its budget up front, and an over-long story is refused with its length.
     expect(input).toMatchObject({ narrativeLimit: 12000, previousNarrativeChars: 'Two requests under way.'.length, roomChars: 12000 - 'Two requests under way.'.length });
-    expect(() => run(['record-story', write('s.json', { narrative: 'x'.repeat(12001) })])).toThrow('narrative is 12001 characters; it must be 1–12000. Cut at least 1 characters.');
+    // husni fork: up to a quarter over the limit is kept as written; past that it is refused with the real limit.
+    run(['record-story', write('s.json', { narrative: 'x'.repeat(12037) })]);
+    expect(readLedger(dir).story.narrative).toHaveLength(12037);
+    expect(() => run(['record-story', write('s.json', { narrative: 'x'.repeat(15001) })])).toThrow('narrative is 15001 characters; it must be 1–12000. Cut at least 3001 characters.');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

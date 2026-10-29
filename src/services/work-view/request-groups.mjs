@@ -267,11 +267,15 @@ export function applyGroupDecisions(stored, decisions, now = Date.now(), { proje
 }
 
 const isIsoOrNull = (value) => value === null || (typeof value === 'string' && Number.isFinite(Date.parse(value)));
+/** husni fork: text up to a quarter over its limit is kept as written. Models overran by a few characters run after
+ * run (a story at 12,037 of 12,000, summaries at 284 and 286 of 280), and each refusal spent another run on it. The
+ * limits only bound what is written: nothing re-checks them on read. */
+const OVER_LIMIT_TOLERANCE = 1.25;
 function boundedText(value, max, label, optional = false) {
   if (optional && (value == null || value === '')) return '';
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(`${label} must be 1–${max} characters.`);
   // The length goes in the refusal: an agent asked to fix "must be 1–12000" without it rewrote a 22K story at 22K (Oct 24).
-  if (value.length > max) throw new TypeError(`${label} is ${value.length} characters; it must be 1–${max}. Cut at least ${value.length - max} characters.`);
+  if (value.length > Math.floor(max * OVER_LIMIT_TOLERANCE)) throw new TypeError(`${label} is ${value.length} characters; it must be 1–${max}. Cut at least ${value.length - max} characters.`);
   return value.trim();
 }
 
