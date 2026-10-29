@@ -1,4 +1,5 @@
 type HumanCopyProvider = (input: unknown) => Promise<Record<string, unknown>>;
+export const HUMAN_COPY_SYSTEM_PROMPT: string;
 export function chatCompletionsHumanCopyProvider(options: { url: string; apiKey: string; model: string; fetchImpl?: typeof fetch }): HumanCopyProvider;
 export function fitGeneratedCopy(output: unknown): unknown;
 export class HumanCopyWorker {

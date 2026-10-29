@@ -22,6 +22,8 @@ import { MAX_WORK_STATE_FIELDS_JSON_CHARS } from '../../../work-view/work-state-
 import { AGENT_LIFECYCLE_LIST, agentStopFields } from '../../../work-view/agent-lifecycle.mjs';
 import { getProjectContext } from '../../../../utils/project-name.js';
 import { chatCompletionsHumanCopyProvider, HumanCopyWorker } from '../../../work-view/human-copy-worker.mjs';
+import { claudeHumanCopyProvider } from '../../../work-view/claude-human-copy.js';
+import { resolveTierAlias } from '../../model-aliases.js';
 import { AutoRefreshWorker } from '../../../work-view/auto-refresh-worker.mjs';
 import { buildRefreshTask } from '../../../work-view/refresh-task.js';
 import { HostedIntent } from '../../../work-view/hosted-intent.js';
@@ -278,6 +280,10 @@ type HumanCopyProvider = ReturnType<typeof chatCompletionsHumanCopyProvider>;
  * configured. Other providers keep the recorded wording. */
 export function configuredHumanCopyProvider(settingsPath = USER_SETTINGS_PATH): HumanCopyProvider | null {
   const settings = SettingsDefaultsManager.loadFromFile(settingsPath, true, { readOnly: true });
+  // husni fork: opt in to writing them through the observer's own Claude Code.
+  if (settings.CLAUDE_MEM_HUMAN_COPY_PROVIDER === 'claude') {
+    return claudeHumanCopyProvider({ model: resolveTierAlias(settings.CLAUDE_MEM_MODEL, settings) });
+  }
   const apiKey = settings.CLAUDE_MEM_OPENROUTER_API_KEY?.trim();
   if (settings.CLAUDE_MEM_PROVIDER !== 'openrouter' || !apiKey) return null;
   return chatCompletionsHumanCopyProvider({
