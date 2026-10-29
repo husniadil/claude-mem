@@ -83,6 +83,21 @@ describe('overall requests and progress reviews', () => {
   expect(() => validateProgress({ ...base, reviewBasis: undefined }, groups)).toThrow(/reviewBasis/);
 });
 
+  it('review evidence takes a list, one bare id or nothing, and names any other shape it refuses', () => {
+  const groups = { g_000000000001: { title: 'Cards' } };
+  const base = { groupId: 'g_000000000001', state: 'in-progress', percent: 40, summary: 'Under way.', reviewBasis: { checkedThrough: '2026-10-04T00:00:00Z', conversations: [key('a')] } };
+  const milestone = (evidence: unknown) => ({ ...base, milestones: [{ at: '2026-10-02T00:00:00Z', text: 'Cards drawn.', evidence }] });
+  expect(validateProgress({ ...base, evidence: ['obs 1', 2] }, groups).evidence).toEqual(['obs 1', '2']);
+  expect(validateProgress({ ...base, evidence: 'obs 1' }, groups).evidence).toEqual(['obs 1']);
+  expect(validateProgress({ ...base, evidence: '  ' }, groups).evidence).toEqual([]);
+  expect(validateProgress({ ...base, evidence: null }, groups).evidence).toEqual([]);
+  expect(validateProgress(base, groups).evidence).toEqual([]);
+  expect(() => validateProgress({ ...base, evidence: { obs: 1 } }, groups)).toThrow('evidence must be a list of observation or prompt ids.');
+  expect(validateProgress(milestone('prompt 7'), groups).milestones[0].evidence).toEqual(['prompt 7']);
+  expect(validateProgress(milestone(['a', 'b', 'c', 'd', 'e', 'f', 'g']), groups).milestones[0].evidence).toHaveLength(6);
+  expect(() => validateProgress(milestone(7), groups)).toThrow('milestones[0].evidence must be a list of observation or prompt ids.');
+});
+
   it('a review records how released work landed, with evidence and the why of each change', () => {
   const groups = { g_000000000001: { title: 'Cards' } };
   const base = { groupId: 'g_000000000001', state: 'shipped', percent: 100, shippedAt: '2026-10-03T00:00:00Z', summary: 'Cards merged and released.', reviewBasis: { checkedThrough: '2026-10-04T00:00:00Z', conversations: [key('a')] } };

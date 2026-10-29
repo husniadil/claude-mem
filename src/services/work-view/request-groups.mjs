@@ -307,6 +307,18 @@ export function validateOutcome(outcome) {
   };
 }
 
+/**
+ * A review's evidence ids. One id given as a bare string is a list of one, since a model asked for
+ * a list sometimes answers with a string (husni fork). Any other shape is refused by name, so the
+ * refresh's re-ask tells the model what to fix rather than passing on a TypeError from `.map`.
+ */
+function evidenceIds(value, max, label) {
+  if (value == null) return [];
+  if (typeof value === 'string') return value.trim() ? [value] : [];
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be a list of observation or prompt ids.`);
+  return value.map(String).slice(0, max);
+}
+
 /** Progress reviews are agent assessments; keep them bounded and dated. */
 export function validateProgress(entry, knownGroups) {
   if (!entry || typeof entry !== 'object') throw new TypeError('Progress must be an object.');
@@ -330,7 +342,7 @@ export function validateProgress(entry, knownGroups) {
     narrative: boundedText(entry.narrative, 1200, 'narrative', true),
     milestones: milestones.map((milestone, index) => {
       if (!isIsoOrNull(milestone.at ?? null)) throw new TypeError(`milestones[${index}].at must be an ISO date or null.`);
-      return { at: milestone.at ?? null, text: boundedText(milestone.text, 200, `milestones[${index}].text`), evidence: (milestone.evidence ?? []).map(String).slice(0, 6) };
+      return { at: milestone.at ?? null, text: boundedText(milestone.text, 200, `milestones[${index}].text`), evidence: evidenceIds(milestone.evidence, 6, `milestones[${index}].evidence`) };
     }),
     preferences: preferences.map((preference, index) => {
       if (!PREFERENCE_KINDS.includes(preference.kind)) throw new TypeError(`preferences[${index}].kind must be one of ${PREFERENCE_KINDS.join(', ')}.`);
@@ -338,7 +350,7 @@ export function validateProgress(entry, knownGroups) {
       return { kind: preference.kind, preference: boundedText(preference.preference, 200, `preferences[${index}].preference`), quote: boundedText(preference.quote, 300, `preferences[${index}].quote`), at: preference.at ?? null };
     }),
     outcome: validateOutcome(entry.outcome),
-    evidence: (entry.evidence ?? []).map(String).slice(0, 20),
+    evidence: evidenceIds(entry.evidence, 20, 'evidence'),
     // What the reviewer actually saw: later activity or membership changes make it due again.
     reviewedThrough: new Date(Date.parse(basis.checkedThrough)).toISOString(),
     reviewedConversations: [...new Set(basis.conversations)].sort(),
