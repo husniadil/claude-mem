@@ -413,3 +413,20 @@ describe('projectRoot', () => {
     }
   });
 });
+
+// husni fork: on proxenos the 109 My Focus rows of one refresh pushed agents' older work_state_write calls out of the
+// window readAgentRecords reads them in, and that work read as unlinked.
+describe('the work-call window', () => {
+  it("counts agents' lists only, so a refresh's bulk My Focus, lifecycle and goals rows do not push older work out", () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE tool_uses (id INTEGER PRIMARY KEY, project TEXT, platform_source TEXT, agent_id TEXT, agent_type TEXT, session_db_id INTEGER,
+      memory_session_id TEXT, content_session_id TEXT, prompt_number INTEGER, tool_name TEXT, tool_input TEXT, tool_response TEXT, created_at_epoch INTEGER);`);
+    const old = NOW - 3 * DAY;
+    db.prepare('INSERT INTO tool_uses (session_db_id, tool_name, tool_input, created_at_epoch) VALUES (?, ?, ?, ?)')
+      .run(1, 'mcp__plugin_claude-mem_mcp-search__work_state_write', JSON.stringify({ list: 'audit', fields: { task: 'x' } }), old);
+    const list = (name: string, times: number[]) => ({ name, stateUpdatedAtEpoch: null, tasks: times.map(updatedAtEpoch => ({ updatedAtEpoch })) });
+    const recent = (count: number) => Array.from({ length: count }, (_, index) => NOW - index * 1000);
+    const workState = { lists: [list('audit', [old]), list('my-focus', recent(240)), list('agent-lifecycle', recent(40)), list('owner-goals', recent(20)), list('my-rules', recent(5))] };
+    expect(readAgentRecords(db, { workState, now: NOW }).calls.map((call: any) => call.created_at_epoch)).toEqual([old]);
+  });
+});

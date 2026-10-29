@@ -77,7 +77,12 @@ export function activitySignature(database) {
 // and conversations with a recent ask are read even before any work exists.
 export const REQUEST_WINDOW_MS = 14 * 86400000;
 export function readAgentRecords(database, { observationLimit = 300, summaryLimit = 100, workCallLimit = 5000, requestSessionLimit = 600, workState, ledger = null, now = Date.now() } = {}) {
-  const recentWorkTimes = workState?.lists.flatMap((list) => [list.stateUpdatedAtEpoch, ...list.tasks.map((task) => task.updatedAtEpoch)]).filter(Boolean).sort((a, b) => b - a).slice(0, 240);
+  // husni fork: the window counts agents' work only, leaving out the lists buildAgentView keeps out of its items. A refresh
+  // writes My Focus rows (and goals) in bulk, and counted here the 109 of proxenos's first placement pushed every
+  // work_state_write call older than two days out, so that work read as unlinked.
+  const recentWorkTimes = workState?.lists
+    .filter((list) => !isOwnerGoalsList(list.name) && !isMyRulesList(list.name) && !isMyFocusList(list.name) && !isAgentLifecycleList(list.name))
+    .flatMap((list) => [list.stateUpdatedAtEpoch, ...list.tasks.map((task) => task.updatedAtEpoch)]).filter(Boolean).sort((a, b) => b - a).slice(0, 240);
   const workSinceEpoch = recentWorkTimes?.length ? recentWorkTimes.at(-1) - 5000 : 0;
   const calls = safeRead(database, `SELECT id, project, platform_source, agent_id, agent_type, session_db_id, memory_session_id, content_session_id, prompt_number, tool_input, created_at_epoch
     FROM tool_uses WHERE tool_name IN (SELECT DISTINCT tool_name FROM tool_uses WHERE tool_name LIKE '%work_state_write%')
