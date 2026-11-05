@@ -271,11 +271,13 @@ const isIsoOrNull = (value) => value === null || (typeof value === 'string' && N
  * run (a story at 12,037 of 12,000, summaries at 284 and 286 of 280), and each refusal spent another run on it. The
  * limits only bound what is written: nothing re-checks them on read. */
 const OVER_LIMIT_TOLERANCE = 1.25;
+/** Whether text is longer than the validators keep: its limit plus the tolerance. */
+export const overLimit = (value, max) => typeof value === 'string' && value.length > Math.floor(max * OVER_LIMIT_TOLERANCE);
 function boundedText(value, max, label, optional = false) {
   if (optional && (value == null || value === '')) return '';
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(`${label} must be 1–${max} characters.`);
   // The length goes in the refusal: an agent asked to fix "must be 1–12000" without it rewrote a 22K story at 22K (Oct 24).
-  if (value.length > Math.floor(max * OVER_LIMIT_TOLERANCE)) throw new TypeError(`${label} is ${value.length} characters; it must be 1–${max}. Cut at least ${value.length - max} characters.`);
+  if (overLimit(value, max)) throw new TypeError(`${label} is ${value.length} characters; it must be 1–${max}. Cut at least ${value.length - max} characters.`);
   return value.trim();
 }
 

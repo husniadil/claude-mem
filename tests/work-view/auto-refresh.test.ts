@@ -447,26 +447,73 @@ describe('focus step', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  // husni fork: a story past the limit's tolerance (a quarter over 12,000) is refused, then asked on the retry models.
-  it('a story the validator refuses is asked again on the retry models', async () => {
-    const dir = scratchDir('auto-refresh-story-refused');
+  /** A refresh whose story answers come from `story`, called with each story prompt in turn. */
+  async function storyRun(name: string, story: (prompt: string, call: number) => unknown) {
+    const dir = scratchDir(name);
+    const database = fixtureDatabase();
+    requests(database, dir, ['b', 'c']);
+    const writer = focusWriter(database);
+    const storyModels: unknown[] = [];
+    const ask = async (prompt: string, models?: unknown) => {
+      if (prompt.includes('Do only section 2')) return reviewAll(prompt);
+      if (isOtherPass(prompt)) return JSON.stringify({ placements: [], proposals: [] });
+      if (prompt.includes('Do only section 3')) return everyRequestInOther(prompt);
+      storyModels.push(models);
+      return JSON.stringify(story(prompt, storyModels.length));
+    };
+    const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: 3, ungrouped: 0, goalsStale: false, unplaced: 3, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: writer.save });
+    const outcome = await task.run(ask, 'claude-code').then(result => ({ result, error: null }), error => ({ result: null, error: error as Error }));
+    return { dir, storyModels, ...outcome };
+  }
+  const preference = { preference: 'Ship small changes.', kind: 'directive', supportCount: 2, quotes: [] };
+
+  // husni fork: a story past the limit's tolerance (a quarter over 12,000) is refused, and the retry on the retry models
+  // condenses that answer. Asked again with the refusal alone, it wrote the update afresh and overran as much (proxenos,
+  // 12 runs from Nov 3 to Nov 5, at 15,098 to 17,888 characters).
+  it('a story refused for its length is condensed from the refused answer on the retry models, keeping its preferences', async () => {
+    let refused: unknown = null;
+    const run = await storyRun('auto-refresh-story-condensed', (prompt, call) => {
+      if (call === 1) return { narrative: 'x'.repeat(15001), preferences: [preference] };
+      expect(prompt).not.toContain('Do only section 4');
+      expect(prompt).toContain('was refused: narrative is 15001 characters; it must be 1–12000. Cut at least 3001 characters.');
+      expect(prompt).toContain('Condense the refused "narrative" to at most 12000 characters: it is 15001, so cut at least 3001.');
+      expect(prompt).toMatch(/the `story-input` it was written from is in \S+-story-input\.json\./);
+      refused = JSON.parse(readFileSync(/The refused answer is in (\S+\.json)/.exec(prompt)![1], 'utf8'));
+      return { narrative: 'Under way.' };
+    });
     try {
-      const database = fixtureDatabase();
-      requests(database, dir, ['b', 'c']);
-      const writer = focusWriter(database);
-      const storyModels: unknown[] = [];
-      const ask = async (prompt: string, models?: unknown) => {
-        if (prompt.includes('Do only section 2')) return reviewAll(prompt);
-        if (isOtherPass(prompt)) return JSON.stringify({ placements: [], proposals: [] });
-        if (prompt.includes('Do only section 3')) return everyRequestInOther(prompt);
-        storyModels.push(models);
-        return JSON.stringify({ narrative: storyModels.length === 1 ? 'x'.repeat(15001) : 'Under way.', preferences: [] });
-      };
-      const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: 3, ungrouped: 0, goalsStale: false, unplaced: 3, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: writer.save });
-      expect(await task.run(ask, 'claude-code')).toMatch(/story written\.$/);
-      expect(storyModels).toEqual([STEP_MODELS.story, CAREFUL_RETRY_MODELS]);
-      expect(readLedger(dir).story.narrative).toBe('Under way.');
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+      expect(run.error).toBeNull();
+      expect(run.result).toMatch(/story written\.$/);
+      expect(refused).toEqual({ narrative: 'x'.repeat(15001), preferences: [preference] });
+      expect(run.storyModels).toEqual([STEP_MODELS.story, CAREFUL_RETRY_MODELS]);
+      const saved = readLedger(run.dir).story;
+      expect(saved.narrative).toBe('Under way.');
+      expect(saved.preferences).toEqual([preference]);
+    } finally { rmSync(run.dir, { recursive: true, force: true }); }
+  });
+
+  it('a story refused for anything but its length is asked again with the refusal, as before', async () => {
+    const run = await storyRun('auto-refresh-story-refused', (prompt, call) => {
+      if (call === 1) return { narrative: '', preferences: [] };
+      expect(prompt).toContain('Do only section 4');
+      expect(prompt).toContain('Your previous answer was refused: narrative must be 1–12000 characters.');
+      return { narrative: 'Under way.', preferences: [] };
+    });
+    try {
+      expect(run.error).toBeNull();
+      expect(run.storyModels).toEqual([STEP_MODELS.story, CAREFUL_RETRY_MODELS]);
+      expect(readLedger(run.dir).story.narrative).toBe('Under way.');
+    } finally { rmSync(run.dir, { recursive: true, force: true }); }
+  });
+
+  it('a condensed story still past the tolerance fails the step, with the condensed answer kept', async () => {
+    const run = await storyRun('auto-refresh-story-still-long', (_prompt, call) =>
+      call === 1 ? { narrative: 'x'.repeat(15001), preferences: [] } : { narrative: 'y'.repeat(15002) });
+    try {
+      expect(run.error?.message).toMatch(/^story \(raw answer: .+failed-answers.+-story-claude-code\.txt\): narrative is 15002 characters; it must be 1–12000\. Cut at least 3002 characters\.$/);
+      expect(readFileSync(/\(raw answer: (.+?\.txt)\)/.exec(run.error!.message)![1], 'utf8')).toBe(JSON.stringify({ narrative: 'y'.repeat(15002) }));
+      expect(readLedger(run.dir).story).toBeFalsy();
+    } finally { rmSync(run.dir, { recursive: true, force: true }); }
   });
 
   it('nothing to place: no focus question; a worker failure is not re-asked', async () => {

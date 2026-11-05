@@ -19,7 +19,7 @@ import type { UsableAgentId } from '../agent-runner/detect.js';
 import { runCommand } from '../agent-runner/detect.js';
 import { writeOwnerPromptsFile, type OwnerPromptsFile } from '../prompt-import/owner-prompts-file.js';
 import { resolvePythonCommand } from './python.js';
-import { FOCUS_BATCH, readGoals, readLedger, runCli, validateFocusAnswer, validateGroupingAnswer, type FocusInput, type LedgerDatabase, type RefreshNeeds } from './request-groups.mjs';
+import { FOCUS_BATCH, overLimit, readGoals, readLedger, runCli, STORY_NARRATIVE_MAX, validateFocusAnswer, validateGroupingAnswer, type FocusInput, type LedgerDatabase, type RefreshNeeds } from './request-groups.mjs';
 import { FOCUS_AUTO_PLACE_THRESHOLD, judgeFocusBatch, placesAlone, type FocusJudge, type FocusJudgement } from './focus-judge.mjs';
 import { isWithdrawnArea, PROPOSAL_KINDS, readFocusAreas, type FocusArea, type RouterFocusBody } from './my-focus.mjs';
 import { NAV_LABELS } from './nav-words.mjs';
@@ -265,12 +265,16 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       return answerPath;
     };
     /** Ask, save, and on a refusal (unreadable JSON or a validator's) ask once more with the reason, on `retryModels`
-     * when given. A step refused twice fails with its last raw answer kept in failed-answers/ for diagnosis. */
-    const step = <T>(name: Step, question: string, save: (answer: any) => T | Promise<T>, answerSchema?: AnswerSchema, retryModels?: StepModels): Promise<T> => timed(name, async () => {
+     * when given. A step refused twice fails with its last raw answer kept in failed-answers/ for diagnosis.
+     * husni fork: `retryQuestion`, given the refused raw answer and the refusal, may ask something else the second time;
+     * null keeps the question with the reason. */
+    const step = <T>(name: Step, question: string, save: (answer: any) => T | Promise<T>, answerSchema?: AnswerSchema, retryModels?: StepModels,
+      retryQuestion?: (refusedAnswer: string, refusal: string) => string | null): Promise<T> => timed(name, async () => {
       let refusal: string | null = null;
       let answer = '';
       for (let attempt = 0; attempt < 2; attempt++) {
-        answer = await ask(refusal ? `${question}\n\nYour previous answer was refused: ${refusal}\nFix it and answer again.` : question, attempt > 0 && retryModels ? retryModels : STEP_MODELS[name], answerSchema);
+        const prompt = refusal ? retryQuestion?.(answer, refusal) ?? `${question}\n\nYour previous answer was refused: ${refusal}\nFix it and answer again.` : question;
+        answer = await ask(prompt, attempt > 0 && retryModels ? retryModels : STEP_MODELS[name], answerSchema);
         try { return await save(parseAgentJson(answer)); }
         catch (error) {
           // A save that failed after it started writing is not the answer's fault, and asking again would write twice.
@@ -480,10 +484,29 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       // Only reviews whose facts (state, percent, dates, milestones, preferences, outcome) moved since the last story; none means the story still holds.
       const storyInput = cli(['story-input']);
       if (storyInput.reviews.length) {
+        const storyInputPath = writeInput('story-input', storyInput);
+        // husni fork: a story refused for its length is condensed from the refused answer, which the retry is given,
+        // and keeps that answer's preferences. Asked again with the refusal alone, the retry never saw what to cut from
+        // and wrote the update afresh from the same previous story, so both answers overran: 12 runs from Nov 3 to
+        // Nov 5 on proxenos, at 15,098 to 17,888 characters of 12,000.
+        let refusedStory: { narrative: string } | null = null;
         await step('story', [
           requestProgress, '---', readOnly,
-          `Do only section 4 (${storyInput.update ? 'update' : 'write'} the build story). The \`story-input\` output is in ${writeInput('story-input', storyInput)}. Reply with only the JSON that \`record-story\` takes ({"narrative": "...", "preferences": [...]}).`,
-        ].join('\n\n'), answer => cli(['record-story'], answer), undefined, CAREFUL_RETRY_MODELS);
+          `Do only section 4 (${storyInput.update ? 'update' : 'write'} the build story). The \`story-input\` output is in ${storyInputPath}. Reply with only the JSON that \`record-story\` takes ({"narrative": "...", "preferences": [...]}).`,
+        ].join('\n\n'), answer => cli(['record-story'], refusedStory ? { ...refusedStory, narrative: answer.narrative } : answer), undefined, CAREFUL_RETRY_MODELS,
+        (refusedAnswer, refusal) => {
+          let story: { narrative?: unknown } | null = null;
+          try { story = parseAgentJson(refusedAnswer); } catch { return null; }
+          if (!story || typeof story.narrative !== 'string' || !overLimit(story.narrative, STORY_NARRATIVE_MAX)) return null;
+          refusedStory = { ...story, narrative: story.narrative };
+          const length = story.narrative.length;
+          return [
+            readOnly,
+            `Your ${storyInput.update ? 'update of' : 'draft of'} the build story was refused: ${refusal}`,
+            `The refused answer is in ${writeInput('refused-story', refusedStory)}, and the \`story-input\` it was written from is in ${storyInputPath}. Do not write the story again from the reviews. Condense the refused "narrative" to at most ${STORY_NARRATIVE_MAX} characters: it is ${length}, so cut at least ${length - STORY_NARRATIVE_MAX}. Shorten the oldest finished chapters to a few sentences each, and merge chapters that tell one thread. Keep the opening recap paragraph, the chapters the listed reviews change, the chapters' order and \`## \` headings, and the dates of the facts you keep. Add nothing new.`,
+            'Reply with only {"narrative": "<the condensed narrative>"}. The refused answer\'s preferences are kept as they are.',
+          ].join('\n\n');
+        });
         done.push(storyInput.update ? 'story updated' : 'story written');
       }
       if (reviewError) throw reviewError;

@@ -49,6 +49,9 @@ export interface FocusInput { areas: FocusAreaRecord[]; dismissed: FocusAreaReco
 export interface OtherInput { areas: FocusAreaRecord[]; dismissed: FocusAreaRecord[]; other: FocusRequestRecord[]; due: boolean }
 export const GROUPING_BATCH: number;
 export const FOCUS_BATCH: number;
+export const STORY_NARRATIVE_MAX: number;
+/** Whether text is longer than the validators keep: its limit plus the tolerance. */
+export function overLimit(value: unknown, max: number): boolean;
 export function focusBasis(ledger: Record<string, any>, groupId: string): string;
 export function focusInput(ledger: Record<string, any>, focus: ReturnType<typeof import('./my-focus.mjs').buildFocusAreas>, localDeviceId: string, database: LedgerDatabase, options?: { limit?: number }): FocusInput;
 export function otherInput(ledger: Record<string, any>, focus: ReturnType<typeof import('./my-focus.mjs').buildFocusAreas>, localDeviceId: string, database: LedgerDatabase): OtherInput;
